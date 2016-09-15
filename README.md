@@ -25,7 +25,7 @@ var blastLevel = require('blast-level');
 
 var db = level('mydb');
 var blastDB = blastLevel(db, {
-    sequence_key: 'sequence', // key in 'mydb' that stores the sequence data
+    sequenceKey: 'sequence', // key in 'mydb' that stores the sequence data
     path: 'my/blastdb/dir' // directory to use for storing BLAST db
 });
 
@@ -71,13 +71,16 @@ Constructor with all properties (defaults shown):
 
 ```
 var blastDB = blastLevel(db, {
-    sequence_key: undefined, // key in db that stores the sequence data
-    path: undefined, // directory to use for storing BLAST db
-    auto_update: true // rebuild blast database when db is changed
+  sequenceKey: undefined, // key in db that stores the sequence data
+  path: undefined, // directory to use for storing BLAST db
+  autoUpdate: true, // rebuild blast database when db is changed
+  updateOnOpen: true, // rebuild blast database when db is opened
+  binPath: undefined, // if BLAST+ commands not in PATH specify bin directory here
+  debug: false // enable debug output
 });
 ```
 
-The options sequence_key and path _must_ be defined. 
+The options sequenceKey and path _must_ be defined. 
 
 You can use blastDB just as you would use the leveldb database directly, but if auto_update is true then any change to the database that touches the sequence data will update the BLAST database to match the sequence data.
 
