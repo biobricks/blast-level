@@ -75,7 +75,7 @@ var blastDB = blastLevel(db, {
   path: undefined, // directory to use for storing BLAST db
   autoUpdate: true, // rebuild blast database when db is changed
   updateOnOpen: true, // rebuild blast database when db is opened
-  binPath: undefined, // if BLAST+ commands not in PATH specify bin directory here
+  binPath: '', // if BLAST+ commands are not in PATH specify bin directory here
   debug: false // enable debug output
 });
 ```
@@ -83,6 +83,8 @@ var blastDB = blastLevel(db, {
 The options sequenceKey and path _must_ be defined. 
 
 You can use blastDB just as you would use the leveldb database directly, but if auto_update is true then any change to the database that touches the sequence data will update the BLAST database to match the sequence data.
+
+Note that if autoUpdate is true then operations like .put that trigger a change to the BLAST database will not call their callbacks until the BLAST update is completed. If you want to avoid this then either disable updateOnOpen or simply call the .put directly on the level database and trigger the update manually.
 
 ## blastStream(query)
 
@@ -103,6 +105,10 @@ This module relies on the official [NCBI BLAST+ toolset](https://blast.ncbi.nlm.
 This module does not actually create a BLAST index, rather it creates an actual BLAST database in BLAST database format by streaming the output of a leveldb database into the `makeblastdb` command line tool with metadata referencing the original leveldb entries. When a BLAST query is performed it is executed using the `blastn` or `blastp` and the results are referenced to the original leveldb entries and streamed out.
 
 Since none of the BLAST+ command line tools allow modifying a BLAST database (appending is sorta supported, see the Notes section) the entire BLAST database must be re-written every time the leveldb database changes in ways that modify the sequence data. 
+
+# ToDo
+
+Add an option for automatic triggering of BLAST database updates without causing the callbacks to wait for the BLAST database update to complete.
 
 # Future
 
