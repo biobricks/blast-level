@@ -257,27 +257,42 @@ BlastLevel.prototype._nblastParse = function(result, cb) {
 //   err
 //   resultCount: number of parsed results
 BlastLevel.prototype._nblastParseStream = function(stream, resultCb, endCb) {
+    var self = this;
     var buffer = '';
     var count = 0;
 
     var m;
-    var regex = /^>/mg;
+    var regex;
     var indexes = [];
     var result;
 
+    function loopWhile(cb) {
+        m = regex.exec(buffer)
+        if(!m) return cb();
+
+        indexes.push(m.index);
+        if(indexes.length < 2) return loopWhile(cb);
+
+        result = buffer.substring(indexes[0], indexes[1]-1);            
+        buffer = buffer.substring(indexes[1]);
+        indexes = [];
+        count++;
+
+        resultCb(result);
+        loopWhile(cb);
+/*
+        self._nblastParse(result, function(err, id, val, result) {
+            if(err) return endCb(err);
+            resultCb(id, val, result);
+            loopWhile(cb);
+        });
+*/
+    }
+
     stream.pipe(through(function(data, enc, cb) {
         buffer += data.toString();
-        while(m = regex.exec(buffer)) {
-            indexes.push(m.index);
-            if(indexes.length < 2) continue;
-
-            result = buffer.substring(indexes[0], indexes[1]-1);            
-            buffer = buffer.substring(indexes[1]);
-            indexes = [];
-            count++;
-            resultCb(result);
-        }
-        cb();
+        regex = /^>/mg;
+        loopWhile(cb);
     }));
 
     stream.on('end', function() {
@@ -286,6 +301,9 @@ BlastLevel.prototype._nblastParseStream = function(stream, resultCb, endCb) {
 
         var result = buffer.substring(m.index);
         count++;
+
+        // TODO check for "Effective search space used" to cut off ending
+
         resultCb(result);
         process.nextTick(function() {
             endCb(null, count);
