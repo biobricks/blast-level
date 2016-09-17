@@ -15,12 +15,15 @@ function BlastLevel(db, opts) {
     if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
     opts = xtend({
-        autoUpdate: true,
-        updateOnOpen: true,
-        binPath: '',
-        debug: false
+        autoUpdate: true, // automatically update BLAST db on changes to leveldb
+        rebuildOnOpen: false, // rebuild the database when it's 
+        binPath: '', // path where BLAST+ binaries are located in not in PATH
+        debug: false // turn debug output on or off
     }, opts);
     this._opts = opts;
+
+    this._mainDB = 'main'; // name of main BLAST db
+    this._updatesDB = 'updates'; // name of BLAST db where updates are written
 
     if(!opts.sequenceKey) {
         throw new Error("opts.sequenceKey must be specified");
@@ -66,13 +69,23 @@ BlastLevel.prototype._open = function(opts, cb) {
         });
     }
 
-    function opened() {
+    function createMainDB(cb) {
+        self._createBlastDB(self._mainDB, function(err, count) {
+            if(err) return cb(err);
+            if(count === 0) {
+                self._mainDB = null;
+            }
+            cb();
+        });
+    }
+
+    function opened(opts, cb) {
         fs.stat(self._path, function(err, stats) {
             if(err) {
                 if(err.code === 'ENOENT') {
                     fs.mkdir(self._path, function(err) {
                         if(err) return cb(err);
-                        self._createBlastDB('main', cb);
+                        createMainDB(cb);
                     });
                     return;
                 } else {
@@ -89,14 +102,14 @@ BlastLevel.prototype._open = function(opts, cb) {
                     if(self._opts.updateOnOpen) return self._rebuildBlastDB(cb);
                     return cb();
                 }
-                self._createBlastDB('main', cb);
+                createMainDB(cb);
             });
         });
         
     }
 
     if(this.db.isOpen()) {
-        return opened()
+        return opened(opts, cb)
     }
     
     this.db.on('open', this.open.bind(this, opts, cb));
@@ -132,6 +145,7 @@ BlastLevel.prototype._batch = function(array, opts, cb) {
 
 BlastLevel.prototype._debug = function(msg) {
     if(!this._opts.debug) return;
+    console.log('[debug]', msg);
 };
 
 BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
@@ -155,16 +169,42 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
 
     seqStream.pipe(makedb.stdin);
 
-    // TODO 
+    var stdoutClosed = false;
+    var stderrClosed = false;
+    var stderr = '';
+
+    var addedCount = 0;
+    var str, m;
     makedb.stdout.on('data', function(data) {
-        console.log("[makeblastdb]", data.toString());
+        str = data.toString();
+        self._debug("[makeblastdb] " + str);
+        m = str.match(/added (\d+) sequences in/);
+        if(!m) return;
+        addedCount = parseInt(m[1]);
+    });
+
+    makedb.stdout.on('close', function() {
+        stdoutClosed = true;
+        if(stderrClosed) {
+            stderr = stderr ? new Error(stderr) : undefined;
+            cb(stderr, addedCount)
+        }
     });
 
     makedb.stderr.on('data', function(data) {
-        console.log("[makeblastdb err]", data.toString());
+        stderr += data.toString();
     });    
-
-    cb();
+    
+    makedb.stderr.on('close', function() {
+        // Ignore "no sequences added" errors
+        m = stderr.match(/No sequences added/i);
+        if(m) stderr = '';
+        stderrClosed = true;
+        if(stdoutClosed) {
+            stderr = stderr ? undefined : new Error(stderr);
+            cb(stderr, addedCount)
+        }
+    });
 };
 
 // create stream of sequences

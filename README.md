@@ -122,6 +122,13 @@ For modified sequence data the modified sequence would simply be added as if it 
 
 A new BLAST database could then be generated from scratch e.g. once every 24 hours.
 
+
+# Dupe result protection
+
+Since blastlevel keeps a primary database containing all of the existing sequences and a secondary database containing all sequences that have been added or modified since last BLAST db rebuild, if a sequence is changed then the new version will be added to the secondary BLAST db while the old version is still present in the primary BLAST db. 
+
+When a BLAST query is executed then it is first run against the secondary BLAST db (if one exists) and a tally of all results is kept in memory as a list of IDs that had query results for their sequences. Then afterwards the query is run against the primary BLAST db and if any of the query results are for IDs that match the list of previous results then they are ignored.
+
 # Notes
 
 While makeblastdb does not support modification of an existing BLAST database, forcing a complete rebuild of the database every time it changes, it does support concatenating existing databases, and it supports the creation of single-entry databases, thus it supports appending to a database in a crude way by first creating a new database with the sequence(s) to be appended, then concatenating the resulting database to the existing database. This isn't exactly an append operation since it writes an antire new database rather than appending to the existing database but it is still likely faster than rebuilding from leveldb so I document it here in case someone finds it useful:
