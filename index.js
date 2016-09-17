@@ -16,7 +16,8 @@ function BlastLevel(db, opts) {
 
     opts = xtend({
         autoUpdate: true, // automatically update BLAST db on changes to leveldb
-        rebuildOnOpen: false, // rebuild the database when it's 
+        rebuildOnOpen: false, // rebuild the BLAST db when it is opened
+        rebuildOnUpdate: false, // rebuilt the main BLAST db on every update
         binPath: '', // path where BLAST+ binaries are located in not in PATH
         debug: false // turn debug output on or off
     }, opts);
@@ -148,6 +149,13 @@ BlastLevel.prototype._debug = function(msg) {
     console.log('[debug]', msg);
 };
 
+// callback gives back args:
+//   err
+//   count: number of sequences added to database
+// If count is 0 then no database was created since makeblastdb
+// will not create empty databases
+// Set opts.stream to a stream outputting FASTA sequences 
+// or a stream will be created outputting all sequences in the level db
 BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     var self = this;
 
@@ -165,7 +173,13 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     
     var makedb = spawn(cmd, args);
 
-    var seqStream = this._seqStream();
+    var seqStream;
+
+    if(opts.stream) {
+        seqStream = stream;
+    } else {
+        seqStream = this._seqStream();
+    }
 
     seqStream.pipe(makedb.stdin);
 
@@ -207,16 +221,87 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     });
 };
 
+// Take a leveldb entry object (with .key and .value) 
+// and turn it into fasta-formatted output that can be
+// referenced back to the leveldb entry
+BlastLevel.prototype._fastaFormat = function(data) {
+    var line = "> id:" + data.key + "\n" + data.value[this._key] + "\n";
+    return line;
+};
+
+
+// Takes as input the output from nblast of one result
+// Gets the levedb entry for the result and calls callback with args:
+//   err
+//   id (leveldb key)
+//   leveldb value
+//   nblast query result
+BlastLevel.prototype._nblastParse = function(result, cb) {
+    var m = result.match(/^>\s+id:([^\s]+)/)
+    if(!m) return cb("Invalid nblast query result");
+
+    var id = m[1];
+    this.db.get(id, function(err, val) {
+        if(err) return cb(err);
+        cb(null, id, val, result);
+    });
+};
+
+
+// parse nblast result stream
+// resultCb is called for each result with args:
+//   id (leveldb key)
+//   leveldb value
+//   nblast query result
+// endCb is called when stream ends or on error with:
+//   err
+//   resultCount: number of parsed results
+BlastLevel.prototype._nblastParseStream = function(stream, resultCb, endCb) {
+    var buffer = '';
+    var count = 0;
+
+    var m;
+    var regex = /^>/mg;
+    var indexes = [];
+    var result;
+
+    stream.pipe(through(function(data, enc, cb) {
+        buffer += data.toString();
+        while(m = regex.exec(buffer)) {
+            indexes.push(m.index);
+            if(indexes.length < 2) continue;
+
+            result = buffer.substring(indexes[0], indexes[1]-1);            
+            buffer = buffer.substring(indexes[1]);
+            indexes = [];
+            count++;
+            resultCb(result);
+        }
+        cb();
+    }));
+
+    stream.on('end', function() {
+        var m = buffer.match(/^>/m);
+        if(!m) return endCb(null, count)
+
+        var result = buffer.substring(m.index);
+        count++;
+        resultCb(result);
+        process.nextTick(function() {
+            endCb(null, count);
+        });
+    });
+}
+
+
 // create stream of sequences
 BlastLevel.prototype._seqStream = function() {
     var self = this;
 
-    var line;
     // TODO check if nothing emitted (which means no db created)
     var seqStream = through.obj(function(data, enc, cb) {
         if(data.value && data.value[self._key]) {
-            line = "> " + data.key + "\n" + data.value[self._key] + "\n";
-            this.push(line);
+            this.push(self._fastaFormat(data));
         }
         cb();
     });
@@ -226,10 +311,18 @@ BlastLevel.prototype._seqStream = function() {
     return seqStream;
 };
 
+BlastLevel.prototype.query = function() {
+ // TODO
+};
+
+
 module.exports = function(db, opts) {
 
+    var blastLevel;
+
     function getInstance(db, opts2) {
-        return new BlastLevel(db, opts);
+        blastLevel = new BlastLevel(db, opts);
+        return blastLevel;
     }
 
     opts = xtend({
@@ -239,5 +332,10 @@ module.exports = function(db, opts) {
     }, opts || {});
 
 
-    return levelup(db, opts);
+    var lup = levelup(db, opts);
+
+
+    lup._nblastParseStream = blastLevel._nblastParseStream;
+
+    return lup;
 };

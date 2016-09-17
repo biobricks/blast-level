@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+var fs = require('fs');
 var level = require('level');
 var blastLevel = require('../index.js');
 
@@ -9,7 +10,6 @@ var blastDB = blastLevel(db, {
     sequenceKey: 'seq', // key in 'mydb' that stores the sequence data
     path: '/tmp/blastdb', // directory to use for storing BLAST db
     rebuildOnOpen: true, // rebuild the BLAST db on open
-    debug: true,
     binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
 });
 
@@ -18,31 +18,18 @@ blastDB.on('error', function(err) {
 });
 
 
-function fail(err) {
-    console.error(err);
-    process.exit(1);
-}
+blastDB.on('open', function() {
+    var fakeResult = fs.createReadStream('./blastn_example_output', {encoding: 'utf8'})
 
-blastDB.put('foo', {
-    seq: "GATTACACATTACA"
-}, function(err) {
-    if(err) fail(err);
+    console.log("OPENED");
 
-    console.log("added foo");
-
-    blastDB.put('fooo', {
-        seq: "CATCATCATCATCAAAAAAAAAAAAT"
-    }, function(err) {
-        if(err) fail(err);
-
-        console.log("added bar");
-    })
-
-
+    blastDB._nblastParseStream(fakeResult, function(res) {
+        
+        console.log("Result:", res);
+        
+    }, function(err, count) {
+        if(err) return console.error("Error:", err);
+        
+        console.log("Total results:", count);
+    });
 })
-
-/*
-
-echo -e "> foo\nGATTACACATTACA" | ./blastn -db /tmp/blastdb/main -task blastn-short
-
-*/
