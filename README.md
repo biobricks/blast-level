@@ -108,7 +108,16 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 
 # ToDo
 
-Add an option for automatic triggering of BLAST database updates without causing the callbacks to wait for the BLAST database update to complete.
+## Critical
+
+* .batch needs to intercept put requests
+
+## Nice to have
+
+* opts.rebuildOnOpen
+* opts.rebuildOnUpdate
+* opts.threadsPerQuery
+* Add an option for automatic triggering of BLAST database updates without causing the callbacks to wait for the BLAST database update to complete.
 
 # Future
 

@@ -8,7 +8,7 @@ var db = level('/tmp/mydb', {valueEncoding: 'json'});
 var blastDB = blastLevel(db, {
     sequenceKey: 'seq', // key in 'mydb' that stores the sequence data
     path: '/tmp/blastdb', // directory to use for storing BLAST db
-    rebuildOnOpen: true, // rebuild the BLAST db on open
+//    rebuildOnOpen: true, // rebuild the BLAST db on open
 //    debug: true,
     binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
 });

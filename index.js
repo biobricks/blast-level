@@ -1,3 +1,28 @@
+/*
+
+  Update:
+
+  State: Update db is called 'update'.
+
+  Increment oneshot counter and generate new dir-unique db name: oneshot1
+
+  Write single sequence to new db with name 'oneshot1'.
+
+  Increment update counter and generate new dir-unique db name: update1
+
+  Concat db 'oneshot1' with 'update' to create 'update1'.
+  Ensure that newest updates are first to queries will give newest results first.
+
+  Change currently active main db name from 'update' to 'update1'
+
+  if active_query_count['update'] is zero
+    Delete old db 'update'.
+
+  After a query on an update db completes, check if the active_query_count for any non-primary databases have dropped to zero and if so delete them. Before each query on an update db increment the active query count for it.
+  
+  When initialized the name of the current update db should be found by looking for the db called 'update*.nin' that was most recently modified or with the largest file size (looking at file size would protect against opening a partially written db in case of a crash).
+
+*/
 
 var spawn = require('child_process').spawn;
 var fs = require('fs');
@@ -15,17 +40,22 @@ function BlastLevel(db, opts) {
     if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
     opts = xtend({
-        autoUpdate: true, // automatically update BLAST db on changes to leveldb
-        rebuildOnOpen: false, // rebuild the BLAST db when it is opened
-        rebuildOnUpdate: false, // rebuilt the main BLAST db on every update
+        autoUpdate: true, // automatically update BLAST db on changes to leveldb (if disabled then you must manually call .update)
+        rebuildOnOpen: false, // TODO rebuild the BLAST db when it is opened
+        rebuildOnUpdate: false, // TODO rebuild the main BLAST db on every update
         binPath: '', // path where BLAST+ binaries are located in not in PATH
-        threadsPerQuery: 1, // how many threads (CPUs) to use for a single query
+        threadsPerQuery: 1, // TODO how many threads (CPUs) to use for a single query 
         debug: false // turn debug output on or off
     }, opts);
     this._opts = opts;
 
     this._mainDB = 'main'; // name of main BLAST db
-    this._updatesDB = 'updates'; // name of BLAST db where updates are written
+    this._updateDB = 'update'; // name of BLAST db where updates are written
+
+    // db state is undefined if unknown, true if it exists and false if it doesn't
+    this._dbState = {};
+    this._dbState[this._mainDB] = undefined;
+    this._dbState[this._updateDB] = undefined;
 
     if(!opts.sequenceKey) {
         throw new Error("opts.sequenceKey must be specified");
@@ -55,8 +85,8 @@ util.inherits(BlastLevel, AbstractLevelDOWN);
 BlastLevel.prototype._open = function(opts, cb) {
     var self = this;
 
-    function doesBlastDBExist(cb) {
-        var dbPath = path.join(self._path, 'main.nin');
+    function doesBlastDBExist(dbName, cb) {
+        var dbPath = path.join(self._path, dbName+'.nin');
         fs.stat(dbPath, function(err, stats) {
             if(err) {
                 if(err.code == 'ENOENT') {
@@ -66,29 +96,21 @@ BlastLevel.prototype._open = function(opts, cb) {
                 }
             }
             if(!stats.isFile()) {
-                return cb(new Error("Blast DB file isn't a file :/"));
+                return cb(new Error("Blast DB file isn't a file: " + dbPath));
             }
             cb(null, true);
         });
     }
 
-    function createMainDB(cb) {
-        self._createBlastDB(self._mainDB, function(err, count) {
-            if(err) return cb(err);
-            if(count === 0) {
-                self._mainDB = null;
-            }
-            cb();
-        });
-    }
-
-    function opened(opts, cb) {
+    function checkDB(dbName, create, cb) {
         fs.stat(self._path, function(err, stats) {
             if(err) {
                 if(err.code === 'ENOENT') {
+                    self._dbState[dbName] = false;
+                    if(!create) return cb()
                     fs.mkdir(self._path, function(err) {
                         if(err) return cb(err);
-                        createMainDB(cb);
+                        self._createBlastDB(dbName, cb);
                     });
                     return;
                 } else {
@@ -100,14 +122,24 @@ BlastLevel.prototype._open = function(opts, cb) {
                 return cb(new Error("Specified path must be a directory"));
             }
 
-            doesBlastDBExist(function(err, exists) {
+            doesBlastDBExist(dbName, function(err, exists) {
                 if(err) return cb(err);
                 if(exists) {
-//                    if(self._opts.rebuildOnOpen) return self._rebuildBlastDB(cb);
+                    self._dbState[dbName] = true;
                     return cb();
                 }
-                createMainDB(cb);
+                self._dbState[dbName] = false;
+                if(!create) return cb()
+                self._createBlastDB(dbName, cb);
             });
+        });
+    }
+
+    function opened(opts, cb) {
+        if(self._opts.rebuildOnOpen) return self._rebuildBlastDB(cb);
+        checkDB(self._mainDB, true, function(err) {
+            if(err) return cb(err);
+            checkDB(self._updateDB, false, cb);
         });
     }
 
@@ -151,6 +183,26 @@ BlastLevel.prototype._debug = function(msg) {
     console.log('[debug]', msg);
 };
 
+
+BlastLevel.prototype._createBlastDB = function(dbName, cb) {
+    var self = this;
+
+    self._debug("Running _createBlastDB for", dbName);
+
+    self.__createBlastDB(dbName, function(err, count) {
+        if(err) return cb(err);
+        if(count == 0) {
+            self._dbState[dbName] = false;
+        } else {
+            self._dbState[dbName] = true;
+        }
+        cb();
+    });
+}
+
+
+// Builds a blast db from all sequences in the leveldb instance
+// or from a specified readable stream
 // callback gives back args:
 //   err
 //   count: number of sequences added to database
@@ -158,10 +210,8 @@ BlastLevel.prototype._debug = function(msg) {
 // will not create empty databases
 // Set opts.stream to a stream outputting FASTA sequences 
 // or a stream will be created outputting all sequences in the level db
-BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
+BlastLevel.prototype.__createBlastDB = function(name, opts, cb) {
     var self = this;
-
-    self._debug("Running createBlastDB");
 
     if(typeof opts === 'function') {
         cb = opts;
@@ -281,9 +331,6 @@ BlastLevel.prototype._blastnParseStream = function(stream, resultCb, endCb) {
         indexes = [];
         count++;
 
-//        resultCb(result);
-//        loopWhile(cb);
-
         self._blastnParse(result, function(err, id, val, result) {
             if(err) {
                 didErr = true;
@@ -334,6 +381,14 @@ BlastLevel.prototype._seqStream = function() {
     return seqStream;
 };
 
+// do any blast databases currently exist?
+BlastLevel.prototype._hasBlastDBs = function() {
+    if(this._dbState[this._mainDB] || this._dbState[this._updateDB]) {
+        return true;
+    }
+    return false;
+}
+
 // TODO auto-detect if amino acid or 
 BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
     var self = this;
@@ -341,6 +396,9 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
         endCb = resultCb;
         resultCb = opts;
         opts = {};
+    }
+    if(!self._hasBlastDBs()) {
+        return endCb();
     }
 
     opts = xtend({
@@ -435,9 +493,6 @@ module.exports = function(db, opts) {
 
 
     var lup = levelup(db, opts);
-
-    // TODO remove
-    lup._blastnParseStream = blastLevel._blastnParseStream;
 
     // expose non-leveldb functions
     lup.query = blastLevel.query.bind(blastLevel);
