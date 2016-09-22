@@ -138,7 +138,60 @@ Since blastlevel keeps a primary database containing all of the existing sequenc
 
 When a BLAST query is executed then it is first run against the secondary BLAST db (if one exists) and a tally of all results is kept in memory as a list of IDs that had query results for their sequences. Then afterwards the query is run against the primary BLAST db and if any of the query results are for IDs that match the list of previous results then they are ignored.
 
-# Notes
+# Design decisions and BLAST+ limitations 
+
+## Queries without a BLAST database
+
+It is possible to run e.g. `blastn` without a BLAST database. The syntax is:
+
+```
+blastn -query /path/to/query/file -subject /path/to/subject/file
+```
+
+Both query and subject file can contain multiple FASTA sequences. 
+
+You can use stdin as either the source of the query or the subject, but not both:
+
+```
+blastn -query /path/to/query/file -subject -
+blastn -query - -subject /path/to/subject/file
+```
+
+If you need an input stream for both query and subject then you need to do something like:
+
+```
+./blastn -query - -subject <(nc -lU /tmp/mysocket)
+```
+
+and then to send the stream of data:
+
+```
+./program_outputting_fasta_sequences | nc -U /tmp/mysocket
+```
+
+This looks encouraging since it seems like we can use two input streams and one output stream and have a nice streaming blastn interface. Unfortunately because `blastn` sorts the output by best match first, it makes sense that it waits until the query is complete before outputting anything. It looks like this sorting cannot be turned off without altering the codebase, so you have no way of getting proper streaming result output other than to execute the blastn command once for each seqeuence in the database.
+
+The file `examples/multiexec.js` implements the "call blastn once for each sequence"-strategy. This was compared to two other strategies: Using a normal blast database as input and using a stream of fasta sequences as input. The NCBI _vector_ database was used as a test set with T7 promoter sequence as the query and the "-task blastn-short" option set. Here's the results on my i5-2520M @ 2.5 GHz and an SSD (though the source files had been purposefully recently accessed such that they should be already be in RAM).
+
+* blast database: 0.182 seconds
+* fasta stream: 0.442 seconds
+* multiexec: 12.354 seconds
+
+The filesize of the vector blast database was 1.4 MB and the fasta version was 4.8 MB.
+
+The blastn results were capped at 300 while multiexec yielded 901 results, but of course those were the 300 best results so cutting the multiexec results to 300 would not have been a fair comparison. I could not find any blastn option that would give more than 300 results (if this is posssible somehow, please let me know).
+
+It is likely that the difference between multiexec and the other strategies would be much diminished when working with very long sequences, since the cost of executing a new instance of blastn is per sequence.
+
+The multiexec strategy is too slow to seriously consider. The blast database strategy is obviously the fastest, but it comes at the cost of maintaining an up to date blast database of all sequences. Since it does not seem to be possible to modify an existing blast database (see next section) this requires either rebuilding the entire blast database every time any sequence is added, deleted or changed. Or doing something clever like keeping one blast database for all existing sequences and another for all changes since the last build, using the `blastdb_aliastool` to virtually combine them for the purpose of queries, and then rebuilding the database e.g. every night at 4 am.
+
+It's probably not a good idea to rebuild this index on each change, unless the database is rather small and changes are rare.
+
+If the fasta stream strategy was used then it would only introduce a slowdown of about a factor 2.5, though granted that was with a fasta stream read from a file rather than from a database. This strategy seems like the winner since it'd be simple to pipe a leveldb read stream into blastn and be done with it. However, this would mean that a node.js process would need to traverse the entire leveldb database, reading the entire values, parsing the JSON and passing on only the sequence data. If queries end up taking multiple seconds then this could become a noticable burden on the server. 
+
+It might be preferably to deal with keeping actual blast databases and letting blastn do its thing indipendently and report back to node.js
+
+## Modifying a BLAST database
 
 While makeblastdb does not support modification of an existing BLAST database, forcing a complete rebuild of the database every time it changes, it does support concatenating existing databases, and it supports the creation of single-entry databases, thus it supports appending to a database in a crude way by first creating a new database with the sequence(s) to be appended, then concatenating the resulting database to the existing database. This isn't exactly an append operation since it writes an antire new database rather than appending to the existing database but it is still likely faster than rebuilding from leveldb so I document it here in case someone finds it useful:
 
