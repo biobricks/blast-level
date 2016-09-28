@@ -22,18 +22,16 @@ var matches = 0;
 function loopWhile(cb) {
     var m = buffer.match(/^(>[^\n]+\n[^>]+)>/);
     if(!m) {
-//        console.log('hm', buffer.substr(0, 200));
         return cb();
     }
     if(m.index !== 0) throw new Error("sequence offset encountered");
     var entry = m[1];
     buffer = buffer.substr(entry.length);
     entries++;
-//    console.log(entry);
+
     query(entry, function(err, hitsfound) {
         if(err) return cb(err);
         if(hitsfound) matches++;
-//        if(matches >= 300) return cb(null, true);
         loopWhile(cb);
     });
 }

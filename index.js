@@ -34,23 +34,26 @@ var defaults = require('levelup-defaults');
 var tmp = require('tmp');
 var levelup = require('levelup');
 var through = require('through2');
+var async = require('async');
 var AbstractLevelDOWN = require('abstract-leveldown').AbstractLevelDOWN;
 
 function BlastLevel(db, opts) {
     if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
     opts = xtend({
-        autoUpdate: true, // automatically update BLAST db on changes to leveldb (if disabled then you must manually call .update)
+        mode: 'blastdb', // or 'direct' or 'streaming' (slow)
         rebuildOnOpen: false, // TODO rebuild the BLAST db when it is opened
-        rebuildOnUpdate: false, // TODO rebuild the main BLAST db on every update
+        rebuildOnChange: false, // TODO rebuild the main BLAST db on every update
         binPath: '', // path where BLAST+ binaries are located in not in PATH
         threadsPerQuery: 1, // TODO how many threads (CPUs) to use for a single query 
         debug: false // turn debug output on or off
     }, opts);
     this._opts = opts;
 
-    this._mainDB = 'main'; // name of main BLAST db
-    this._updateDB = 'update'; // name of BLAST db where updates are written
+    this._dbName = {
+        'main': 'main', // name of the current main BLAST db
+        'update': 'update' // name of the current update BLAST db
+    };
 
     // db state is undefined if unknown, true if it exists and false if it doesn't
     this._dbState = {};
@@ -74,6 +77,18 @@ function BlastLevel(db, opts) {
     this._dbOpts = {
         keyEncoding: 'utf8', 
         valueEncoding: 'json'
+    };
+
+    // how man times have the blast db been rebuilt
+    this.rebuildCount = {
+        main: 0, // main db
+        update: 0 // update db
+    };
+
+    // the last succesful rebuild
+    this.lastRebuild = {
+        main: 0,
+        update: 0
     };
 
     AbstractLevelDOWN.call(this, db.location);
@@ -184,6 +199,7 @@ BlastLevel.prototype._debug = function(msg) {
 };
 
 
+/*
 BlastLevel.prototype._createBlastDB = function(dbName, cb) {
     var self = this;
 
@@ -199,7 +215,7 @@ BlastLevel.prototype._createBlastDB = function(dbName, cb) {
         cb();
     });
 }
-
+*/
 
 // Builds a blast db from all sequences in the leveldb instance
 // or from a specified readable stream
@@ -210,7 +226,7 @@ BlastLevel.prototype._createBlastDB = function(dbName, cb) {
 // will not create empty databases
 // Set opts.stream to a stream outputting FASTA sequences 
 // or a stream will be created outputting all sequences in the level db
-BlastLevel.prototype.__createBlastDB = function(name, opts, cb) {
+BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     var self = this;
 
     if(typeof opts === 'function') {
@@ -388,6 +404,112 @@ BlastLevel.prototype._hasBlastDBs = function() {
     }
     return false;
 }
+
+
+BlastLevel.prototype._uniqueDBName = function(which, cb) {
+    // TODO actually check
+    var self = this;
+
+    process.nextTick(function() {
+        cb(null, which + '-' + self.rebuildCount[which]);
+    });
+}
+
+
+// rebuild a blast db
+// which is either 'main' or 'update'
+BlastLevel.prototype._rebuild = function(which, cb) {
+    var self = this;
+    cb = cb || function(){};
+
+    // give this rebuild the next available build number
+    var buildNum = ++this._rebuildCount[which];
+
+    // generate a directory-unique db name
+    this._uniqueDBName(which, function(err, dbName) {
+        if(err) return cb(err);
+
+
+        // pick the function to actually call to rebuild
+        // based on whether we're rebuilding the 'main' or 'update' db
+        var f;
+        if(which === 'main') {
+            f = this._rebuildMainDB;
+        } else { // 'update'
+            f = this._rebuildMainDB;
+        }
+        
+        f(dbName, function(err) {
+            if(err) return cb(err);
+
+            // if this build's number is greater than the number of the
+            // most recently completed rebuild then we know our rebuild
+            // is newer than the previous rebuild so we can safely
+            // move the current db reference to point to the db we just built
+            // and mark the "previous current" db for deletion
+            // There may still be references to the previous current db 
+            // e.g. there may be queries in progress on it, so we can't just
+            // delete it right away.
+            if(buildNum > self._lastRebuild[which]) {
+                self._dbName[which] = dbName;
+                self._toDelete.push(self._lastRebuild[which]);
+                self._lastRebuild[which] = buildNum;
+                cb();
+            } else { 
+                // another more recent rebuild completed before us so our
+                // rebuild is now outdated and we can delete it immediately
+                // since no other references to this db will exist
+                self._deleteDB(dbName, cb);
+            }
+        });
+    });
+};
+
+BlastLevel.prototype._deleteDB = function(name, cb) {
+    var exts = [
+        'nhr',
+        'nin',
+        'nnd',
+        'nni',
+        'nsd',
+        'nsi',
+        'nsq'
+    ];
+    var self = this;
+
+    async.each(exts, function(ext, cb) {
+        fs.unlink(path.join(self._path, name+'.'+ext), cb);
+    }, function(err) {
+        if(err) return cb(err);
+    });
+};
+
+
+
+
+BlastLevel.prototype._rebuildMainDB = function(dbName, cb) {
+
+    this._createBlastDB(dbName, function(err, count) {
+        if(err) return cb(err);
+
+        self._dbState['main'] = (count == 0) ? false : true;
+        cb();
+    });
+};
+
+
+BlastLevel.prototype._rebuildUpdateDB = function(cb) {
+    throw new Error("TODO not implemented");
+/*
+    Should use BLAST concat:
+
+    makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
+
+    and blastdb_aliastool (or can you pass multiple dbs to blastn?)
+
+*/
+};
+
 
 // TODO auto-detect if amino acid or 
 BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {

@@ -1,0 +1,28 @@
+
+# query protection
+
+Keep an object with a key for each database where a query is currently running where the value is a counter showing how many queries are in progress for the database. Whenever a query completes, decrement the counter for the db the query was performed on. If the db the query was performed on is no longer the current database and the counter is zero then delete that database. 
+
+You might think that all of this shouldn't be necessary since it's ok to delete open files on *nix but the database files could get deleted after the blastn command has been run but before blastn has had a chance to open the file, which would cause the query to fail. Even worse, a blast database consists of multiple files and blastn could have opened only some of them before others are deleted which could cause unpredictable behaviour.
+
+# update protection
+
+last_rebuild = 0; # index of the most recent rebuild to complete.
+
+On put:
+
+* assign next rebuild_counter value as current rebuild number
+* increment rebuild counter 
+* pick a new unique database filename and save it to task object
+** rebuild database to that filename, then when done
+*** if our rebuild number is higher than last_rebuild, meaning that our rebuild is the newest rebuild to complete
+*** change the current blast db reference to point to our database
+*** set last_rebuild to our rebuild number
+*** delete previous current blast db
+*** but if our rebuild number is lower than last_rebuild then we just delete the database we just created since it is already outdated.
+
+# counter overflow
+
+if rebuild_counter is >= MAX then take the number of the smallest currently uncompleted rebuild, or last_rebuild, whichever is smaller, and save it as overflow_offset. Save the current rebuild_counter value as prev_rebuild, then subtract overflow_offset from rebuild_counter and save the rebuild_counter as rebuild_counter. Now, whenever rebuild numbers are evaluated, if they are greater than or equal overflow_offset, subtract overflow_offset before evaluating. Whenever rebuild_counter is incremented, if there are not uncompleted rebuilds with a rebuild number >= overflow_offset, then set overflow_offset to 0.
+
+what happens if the rebuild counter overflows?

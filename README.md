@@ -3,6 +3,8 @@ WARNING: This is not yet working. Don't believe this documentation. Come back la
 
 Streaming BLAST indexes for leveldb databases. Automatically keep an up-to-date BLAST database for your leveldb sequence data and run streaming BLAST queries on the data.
 
+
+
 # Dependencies
 
 Ensure that you have a recent [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download) installed on your system:
@@ -64,6 +66,29 @@ blastDB.blast('caaaggcgaaactgtttacc', function(err, data) {
   console.log("result:", data);
 });
 ```
+
+# Modes
+
+blastlevel can operate in three different modes: 
+
+* blastdb: fastest search but sequence changes trigger partial/full index rebuild
+* direct: at least 2-3x slower than blastdb and puts more load on node.js + leveldb but index rebuild on sequence changes
+* streaming: ~70x slower than blastdb but results stream as they are found and are not sorted by blast. no index rebuild on sequence changes
+
+In the `blastdb` and `direct` modes the output will be in the normal `blastn` format, meaning that a ranked list of the best matches is output to when the query is completed and nothing is output before completion. 
+
+## blastdb
+
+`blastdb` mode keeps a native blast database in the blast database format on disk. This is the fastest option. In this mode, two blast databases are kept. A primary blast database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling .rebuild() which could be done by a cron script, and it can be triggered automatically whenever the blastlevel database is opened by setting rebuildOnOpen: true (default false). If rebuildOnChange is set to true (default false) then a single blast db is kept containing all sequence data and the entire blast database is rebuilt every time sequence data is changed.
+
+## direct
+
+`direct` mode does not keep a native blast database of the sequence data. Instead, all of the sequence data is streamed from leveldb and piped into the `blastn` command every time 
+
+## streaming
+
+In `streaming` mode `blastn` is called once for each sequence, which causes a significant performance hit, but each matching sequence result is streamed out as soon as it is matched in a streaming fashion. No ordering of results takes place in the `streaming` mode.
+
 
 # API
 
@@ -202,6 +227,10 @@ cat seq_to_append1.fasta seq_to_append2.fasta | makeblastdb -dbtype nucl -title 
 # Concatenate the to_append database with the existing database
 makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
 ```
+
+# Operating system support
+
+This module will currently not work on windows since it depends on unix domain sockets and the `nc` utility.
 
 # Copyright and license
 
