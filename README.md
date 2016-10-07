@@ -4,6 +4,9 @@ WARNING: This is not yet working. Don't believe this documentation. Come back la
 Streaming BLAST indexes for leveldb databases. Automatically keep an up-to-date BLAST database for your leveldb sequence data and run streaming BLAST queries on the data.
 
 
+# Notes
+
+When operating in blastdb mode with rebuildOnChange:false (the default) when a sequence is deleted in leveldb the sequence is not deleted in the blast index. If a query is run that results in a hit on a deleted sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last index rebuild no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using another mode.
 
 # Dependencies
 
@@ -148,7 +151,7 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 
 For a large enough dataset it may not be feasible to rebuild the entire BLAST database on each change. It should be fairly easy to implement an alternate strategy that accommodates both added, deleted and modified sequence data without constantly rewriting the entire database.
 
-All new sequence data would be written to a separate database which would have to be rewritten on each change (or use the concat trick in the notes) but would be much smaller than the complete database. The query could then be run against both the existing and new database or the BLAST+ tool `blastdb_aliastool` can be used to create an alias that links the two databases so they act as a single database.
+All new sequence data would be written to a separate database which would have to be rewritten on each change (or use the concat trick in the notes) but would be much smaller than the complete database. The query could then be run against both the existing and new database using `blastn -db 'db1 db2'` (blastdb_aliastool is not necessary) can be used to create an alias that links the two databases so they act as a single database.
 
 For deleted data the existing module already throws away query results that do not match any leveldb entries.
 

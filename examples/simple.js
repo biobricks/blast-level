@@ -8,7 +8,9 @@ var db = level('/tmp/mydb', {valueEncoding: 'json'});
 var blastDB = blastLevel(db, {
     sequenceKey: 'seq', // key in 'mydb' that stores the sequence data
     path: '/tmp/blastdb', // directory to use for storing BLAST db
-//    rebuildOnOpen: true, // rebuild the BLAST db on open
+    rebuildOnOpen: false, // rebuild the BLAST index when the db is opened
+    rebuildOnChange: false, // rebuild the BLAST index whenever the db is updated
+    keepUpdateIndex: false,
 //    debug: true,
     binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
 });
@@ -40,20 +42,31 @@ blastDB.put('foo-'+r(), {
 
         console.log("added bar");
 
-        console.log("running query");
+        console.log("building blast index");
 
-        blastDB.query("ATTACACATTAC", function(data) {
-            
-            console.log("Got result:", data.key);
-            
-        }, function(err) {
+        blastDB.rebuild(function(err) {
             if(err) return console.error("Error:", err);
-            
-            console.log("end of results");
-            
-        });
 
-    })
+        console.log("rebuilding blast index");
+
+            blastDB.rebuild(function(err) {
+                if(err) return console.error("Error:", err);
+                
+                console.log("running blast query");
+                
+                blastDB.query("ATTACACATTAC", function(data) {
+                    
+                console.log("Got result:", data.key);
+                    
+                }, function(err) {
+                    if(err) return console.error("Error:", err);
+                    
+                    console.log("end of results");
+                    
+                });
+            });
+        });
+    });
 })
 
 /*

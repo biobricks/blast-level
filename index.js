@@ -34,6 +34,7 @@ var defaults = require('levelup-defaults');
 var tmp = require('tmp');
 var levelup = require('levelup');
 var through = require('through2');
+var from = require('from2');
 var async = require('async');
 var AbstractLevelDOWN = require('abstract-leveldown').AbstractLevelDOWN;
 
@@ -42,23 +43,30 @@ function BlastLevel(db, opts) {
 
     opts = xtend({
         mode: 'blastdb', // or 'direct' or 'streaming' (slow)
-        rebuildOnOpen: false, // TODO rebuild the BLAST db when it is opened
-        rebuildOnChange: false, // TODO rebuild the main BLAST db on every update
+        rebuildOnOpen: false, // rebuild the BLAST index when dbs is opened
+        rebuildOnChange: false, // rebuild the main BLAST index whenever the db is changed
+        keepUpdateIndex: true, // keep changes since last rebuild in separate BLAST index
         binPath: '', // path where BLAST+ binaries are located in not in PATH
         threadsPerQuery: 1, // TODO how many threads (CPUs) to use for a single query 
         debug: false // turn debug output on or off
     }, opts);
     this._opts = opts;
 
-    this._dbName = {
-        'main': 'main', // name of the current main BLAST db
-        'update': 'update' // name of the current update BLAST db
+    this._dbs = {
+        'main': {
+            rebuildCount: 0, // number of rebuilds completed
+            lastRebuild: 0, // number of last completed rebuild
+            exists: false
+        },
+        'update': {
+            rebuildCount: 0,
+            lastRebuild: 0,
+            exists: false
+        }
     };
 
-    // db state is undefined if unknown, true if it exists and false if it doesn't
-    this._dbState = {};
-    this._dbState[this._mainDB] = undefined;
-    this._dbState[this._updateDB] = undefined;
+    this._queryCount = {}; // number of active queries for each db, indexed by name
+    this._toDelete = [];
 
     if(!opts.sequenceKey) {
         throw new Error("opts.sequenceKey must be specified");
@@ -77,18 +85,6 @@ function BlastLevel(db, opts) {
     this._dbOpts = {
         keyEncoding: 'utf8', 
         valueEncoding: 'json'
-    };
-
-    // how man times have the blast db been rebuilt
-    this.rebuildCount = {
-        main: 0, // main db
-        update: 0 // update db
-    };
-
-    // the last succesful rebuild
-    this.lastRebuild = {
-        main: 0,
-        update: 0
     };
 
     AbstractLevelDOWN.call(this, db.location);
@@ -117,15 +113,16 @@ BlastLevel.prototype._open = function(opts, cb) {
         });
     }
 
-    function checkDB(dbName, create, cb) {
+    function checkDB(which, create, cb) {
+        var dbName = self._dbName(which);
+
         fs.stat(self._path, function(err, stats) {
             if(err) {
                 if(err.code === 'ENOENT') {
-                    self._dbState[dbName] = false;
-                    if(!create) return cb()
                     fs.mkdir(self._path, function(err) {
                         if(err) return cb(err);
-                        self._createBlastDB(dbName, cb);
+                        if(!create) return cb()
+                        self._rebuild(which, cb);
                     });
                     return;
                 } else {
@@ -140,21 +137,21 @@ BlastLevel.prototype._open = function(opts, cb) {
             doesBlastDBExist(dbName, function(err, exists) {
                 if(err) return cb(err);
                 if(exists) {
-                    self._dbState[dbName] = true;
+                    self._dbs[which].exists = true;
                     return cb();
                 }
-                self._dbState[dbName] = false;
                 if(!create) return cb()
-                self._createBlastDB(dbName, cb);
+                self._rebuild(dbName, cb);
             });
         });
     }
 
     function opened(opts, cb) {
-        if(self._opts.rebuildOnOpen) return self._rebuildBlastDB(cb);
-        checkDB(self._mainDB, true, function(err) {
+        if(self._opts.rebuildOnOpen) return self._rebuild('main', cb);
+
+        checkDB('main', self._opts.rebuildOnOpen, function(err) {
             if(err) return cb(err);
-            checkDB(self._updateDB, false, cb);
+            checkDB('update', false, cb);
         });
     }
 
@@ -176,8 +173,30 @@ BlastLevel.prototype._get = function(key, opts, cb) {
     this.db.get(key, opts, cb);
 };
 
+// get the sequence data from a leveldb value
+BlastLevel.prototype._seqFromVal = function(val) {
+    return val[this._key];
+}
+
 BlastLevel.prototype._put = function(key, value, opts, cb) {
-    this.db.put(key, JSON.parse(value), opts, cb);
+    var self = this;
+
+    if(!this._opts.rebuildOnChange) {
+        var val = JSON.parse(value);
+        return this.db.put(key, val, opts, function(err) {
+            if(err) return cb(err);
+            if(self._opts.keepUpdateIndex) {
+                self._rebuild('update', {key: key, value: val}, cb);
+            } else {
+                cb();
+            }
+        });
+    }
+
+    var self = this;
+    this.db.put(key, JSON.parse(value), opts, function(err) {
+        self._rebuild('main', cb);
+    });
 };
 
 
@@ -198,6 +217,20 @@ BlastLevel.prototype._debug = function(msg) {
     console.log('[debug]', msg);
 };
 
+
+BlastLevel.prototype._changeQueryCount = function(names, num) {
+    if(!(names instanceof Array)) {
+        names = [names];
+    }
+    var i;
+    for(i=0; i < names.length; i++) {
+        if(this._queryCount[names[i]]) {
+            this._queryCount[names[i]] += num;
+        } else {
+            this._queryCount[names[i]] = num;
+        }
+    }
+};
 
 /*
 BlastLevel.prototype._createBlastDB = function(dbName, cb) {
@@ -234,19 +267,20 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
         opts = {};
     }
     
-    var dbPath = path.join(self._path, 'main');
+    var dbPath = path.join(self._path, name);
+    console.log("CREATING", dbPath);
 
     var cmd = path.join(this._opts.binPath, "makeblastdb");
     var args = ["-dbtype", "nucl", "-title", "'blastlevel'", "-out", dbPath];
     
     var makedb = spawn(cmd, args);
 
-    var seqStream;
+    var seqStream = this._seqStream();
 
     if(opts.stream) {
-        seqStream = stream;
+        opts.stream.pipe(seqStream);
     } else {
-        seqStream = this._seqStream();
+        this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
     }
 
     seqStream.pipe(makedb.stdin);
@@ -265,6 +299,7 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
         addedCount = parseInt(m[1]);
     });
 
+    // TODO act on makedb.close instead!
     makedb.stdout.on('close', function() {
         stdoutClosed = true;
         if(stderrClosed) {
@@ -272,6 +307,7 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
             cb(stderr, addedCount)
         }
     });
+
 
     makedb.stderr.on('data', function(data) {
         stderr += data.toString();
@@ -293,7 +329,7 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
 // and turn it into fasta-formatted output that can be
 // referenced back to the leveldb entry
 BlastLevel.prototype._fastaFormat = function(data) {
-    var line = "> id:" + data.key + "\n" + data.value[this._key] + "\n";
+    var line = "> id:" + data.key + "\n" + this._seqFromVal(data.value) + "\n";
     return line;
 };
 
@@ -386,86 +422,116 @@ BlastLevel.prototype._seqStream = function() {
     var self = this;
 
     var seqStream = through.obj(function(data, enc, cb) {
-        if(data.value && data.value[self._key]) {
+        console.log(data);
+        if(data.value && self._seqFromVal(data.value)) {
             this.push(self._fastaFormat(data));
         }
         cb();
     });
-
-    this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
 
     return seqStream;
 };
 
 // do any blast databases currently exist?
 BlastLevel.prototype._hasBlastDBs = function() {
-    if(this._dbState[this._mainDB] || this._dbState[this._updateDB]) {
+    if(this._dbs['main'].exists || this._dbs['update'].exists) {
         return true;
     }
     return false;
 }
 
 
-BlastLevel.prototype._uniqueDBName = function(which, cb) {
-    // TODO actually check
-    var self = this;
+// name of current db
+BlastLevel.prototype._dbName = function(which) {
+    if(!this._dbs[which].exists) return null;
+    return this._numberToDBName(which, this._dbs[which].lastRebuild);
+}
 
-    process.nextTick(function() {
-        cb(null, which + '-' + self.rebuildCount[which]);
-    });
+
+BlastLevel.prototype._numberToDBName = function(which, number) {
+    return which + '-' + number;
 }
 
 
 // rebuild a blast db
 // which is either 'main' or 'update'
-BlastLevel.prototype._rebuild = function(which, cb) {
+// data is optionally a single {key: ..., value: ...} object
+// to build the database from
+BlastLevel.prototype._rebuild = function(which, data, cb) {
+    if(typeof data === 'function') {
+        cb = data;
+        data = null;
+    }
     var self = this;
     cb = cb || function(){};
 
     // give this rebuild the next available build number
-    var buildNum = ++this._rebuildCount[which];
+    var buildNum = ++(this._dbs[which].rebuildCount);
 
     // generate a directory-unique db name
-    this._uniqueDBName(which, function(err, dbName) {
+    var dbName = this._numberToDBName(which, buildNum);
+
+    // pick the function to actually call to rebuild
+    // based on whether we're rebuilding the 'main' or 'update' db
+    var f;
+    if(which === 'main') {
+        f = this._rebuildMainDB.bind(this);
+    } else { // 'update'
+        f = this._rebuildUpdateDB.bind(this);
+    }
+    
+    f(dbName, data, function(err) {
         if(err) return cb(err);
-
-
-        // pick the function to actually call to rebuild
-        // based on whether we're rebuilding the 'main' or 'update' db
-        var f;
-        if(which === 'main') {
-            f = this._rebuildMainDB;
-        } else { // 'update'
-            f = this._rebuildMainDB;
-        }
         
-        f(dbName, function(err) {
-            if(err) return cb(err);
-
-            // if this build's number is greater than the number of the
-            // most recently completed rebuild then we know our rebuild
-            // is newer than the previous rebuild so we can safely
-            // move the current db reference to point to the db we just built
-            // and mark the "previous current" db for deletion
-            // There may still be references to the previous current db 
-            // e.g. there may be queries in progress on it, so we can't just
-            // delete it right away.
-            if(buildNum > self._lastRebuild[which]) {
-                self._dbName[which] = dbName;
-                self._toDelete.push(self._lastRebuild[which]);
-                self._lastRebuild[which] = buildNum;
-                cb();
-            } else { 
-                // another more recent rebuild completed before us so our
-                // rebuild is now outdated and we can delete it immediately
-                // since no other references to this db will exist
-                self._deleteDB(dbName, cb);
-            }
-        });
+        // if this build's number is greater than the number of the
+        // most recently completed rebuild then we know our rebuild
+        // is newer than the previous rebuild so we can safely
+        // move the current db reference to point to the db we just built
+        // and mark the "previous current" db for deletion
+        // There may still be references to the previous current db 
+        // e.g. there may be queries in progress on it, so we can't just
+        // delete it right away.
+        if(buildNum > self._dbs[which].lastRebuild) {
+            self._dbName[which] = dbName;
+            var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
+            self._toDelete.push(lastName);
+            self._dbs[which].lastRebuild = buildNum;
+            self._processDeletions(); // callback doesn't have to wait for this
+            cb();
+        } else { 
+            // another more recent rebuild completed before us so our
+            // rebuild is now outdated and we can delete it immediately
+            // since no other references to this db will exist
+            self._deleteDB(dbName); // callback doesn't have to wait for this
+            cb();
+        }
     });
 };
 
+
+// delete all dbs that are queued for deletion and
+// which no longer have any running queries
+BlastLevel.prototype._processDeletions = function(cb) {
+    var self = this;
+
+    if(this._toDelete.length <= 0) {
+        if(cb) process.nextTick(cb);
+        return;
+    }
+    cb = cb || function(){};
+
+    async.each(this._toDelete, function(toDelete, cb) {
+        // Don't delete dbs that still have active queries.
+        // This function is also called after
+        // each query ends so all will be cleaned up.
+        if(self._queryCount[toDelete]) return cb();
+
+        self._deleteDB(toDelete, cb);
+    }, cb);
+};
+
 BlastLevel.prototype._deleteDB = function(name, cb) {
+    cb = cb || function(){};
     var exts = [
         'nhr',
         'nin',
@@ -486,28 +552,67 @@ BlastLevel.prototype._deleteDB = function(name, cb) {
 
 
 
-
-BlastLevel.prototype._rebuildMainDB = function(dbName, cb) {
+// this function ignore the data argument for now
+BlastLevel.prototype._rebuildMainDB = function(dbName, data, cb) {
+    var self = this;
 
     this._createBlastDB(dbName, function(err, count) {
         if(err) return cb(err);
 
-        self._dbState['main'] = (count == 0) ? false : true;
+        self._dbs['main'].exists = (count == 0) ? false : true;
         cb();
     });
 };
 
+// create a stream that emits the single object: data
+BlastLevel.prototype._singleObjectStream = function(data) {
+    var done = false;
+    // create a stream that emits a single object and closes
+    return from.obj(function(size, next) {
+        if(done) return next(null, null);
+        done = true;    
+        next(null, data);
+    });
+};
 
-BlastLevel.prototype._rebuildUpdateDB = function(cb) {
-    throw new Error("TODO not implemented");
-/*
-    Should use BLAST concat:
+BlastLevel.prototype._rebuildUpdateDB = function(dbName, data, cb) {
+    var self = this;
 
-    makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
+    if(!this._dbs['update'].exists) {
+        // build update db from single sequence
+        // data should have data.key and data.value
 
-    and blastdb_aliastool (or can you pass multiple dbs to blastn?)
+        var s = this._singleObjectStream(data);
 
-*/
+        this._createBlastDB(dbName, {stream: s}, function(err) {
+            if(err) return cb(err);
+
+            self._dbs['update'].exists = true;
+            cb();
+        });
+        
+
+    } else {
+        throw new Error("TODO not implemented");
+        /*
+          Should use BLAST concat:
+          
+          makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
+          
+          and blastdb_aliastool (or can you pass multiple dbs to blastn?)
+          
+        */
+    }
+};
+
+// get db name(s) to use for queries
+BlastLevel.prototype._queryDBs = function() {
+    var maindb = this._dbName('main');
+    var updatedb = this._dbName('update');
+    var dbs = [];
+    if(maindb) dbs.push(maindb);
+    if(updatedb) dbs.push(updatedb);
+    return dbs;
 };
 
 
@@ -520,7 +625,7 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
         opts = {};
     }
     if(!self._hasBlastDBs()) {
-        return endCb();
+        return endCb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
     }
 
     opts = xtend({
@@ -535,20 +640,33 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
         }
     }
 
-    var dbPath = path.join(self._path, 'main');
+    var qdbs =  this._queryDBs();
+    this._changeQueryCount(qdbs, 1);
+
+    var dbName = qdbs.join(' ');
     var cmd, args;
 
     if(opts.type === 'blastn') {
         cmd = path.join(this._opts.binPath, "blastn");
-        args = ["-task", "blastn-short", "-db", dbPath];
+        args = ["-task", "blastn-short", "-db", dbName];
     } else {
+        // TODO support blastp
         throw new Error("blastp not implemented");
     }
 
-    var blast = spawn(cmd, args);
+    function end(err) {
+        self._changeQueryCount(qdbs, -1);
+        endCb(err);
+    }
+    
+
+//    console.log("CMD", cmd, args.join(' '));
+    var blast = spawn(cmd, args, {
+        cwd: this._path
+    });
 
     var stdoutClosed = false;
-    var stderrClosed = false;
+    var cmdClosed = false;
     var stderr = '';
 
     blast.stdout.on('data', function(str) {
@@ -559,14 +677,17 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
         stderr += data.toString();
     });    
     
-    blast.stderr.on('close', function() {
-        stderrClosed = true;
-        if(stdoutClosed) {
-            stderr = stderr ? new Error(stderr) : undefined;
-            endCb(stderr)
+
+    blast.on('close', function(code) {
+        cmdClosed = true;
+        if(code) {
+            stderr = stderr || "blast command exited with non-zero exit code";
         }
+        if(!stdoutClosed) return;
+
+        if(stderr) return end(new Error(stderr));
+        end();
     });
-    
     self._blastnParseStream(blast.stdout, function(dbKey, dbVal, result) {
         resultCb({
             key: dbKey,
@@ -574,15 +695,13 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
         });
     }, function(err, count) {
         stdoutClosed = true;
-        if(!stderrClosed) return;
         if(err) {
-            if(stderr) {
-                stderr = err.message + "\n" + stderr;
-                return endCb(new Error(stderr));
-            }
-            return endCb(err);
+            stderr = err.message + "\n" + stderr;
         }
-        endCb();
+        if(!cmdClosed) return;
+
+        if(stderr) return end(new Error(stderr));
+        end();
     });
 
 
@@ -595,6 +714,10 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
 
     blast.stdin.end(seq, 'utf8');
 
+};
+
+BlastLevel.prototype.rebuild = function(cb) {
+    this._rebuild('main', cb);
 };
 
 
@@ -618,6 +741,7 @@ module.exports = function(db, opts) {
 
     // expose non-leveldb functions
     lup.query = blastLevel.query.bind(blastLevel);
+    lup.rebuild = blastLevel.rebuild.bind(blastLevel);
 
 
     return lup;
