@@ -10,7 +10,7 @@ var blastDB = blastLevel(db, {
     path: '/tmp/blastdb', // directory to use for storing BLAST db
     rebuildOnOpen: false, // rebuild the BLAST index when the db is opened
     rebuildOnChange: false, // rebuild the BLAST index whenever the db is updated
-    keepUpdateIndex: false,
+//    keepUpdateIndex: false,
 //    debug: true,
     binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
 });
@@ -35,20 +35,21 @@ blastDB.put('foo-'+r(), {
 
     console.log("added foo");
 
-    blastDB.put('bar-'+r(), {
-        seq: "CATCATCATATTACACATTACCATCATCAT"
-    }, function(err) {
-        if(err) fail(err);
-
-        console.log("added bar");
-
-        console.log("building blast index");
-
-        blastDB.rebuild(function(err) {
-            if(err) return console.error("Error:", err);
-
-        console.log("rebuilding blast index");
-
+    console.log("building blast index");
+    
+    blastDB.rebuild(function(err) {
+        if(err) return console.error("Error:", err);
+        
+        blastDB.put('bar-'+r(), {
+            seq: "CATCATCATATTACACATTACCATCATCAT"
+        }, function(err) {
+            if(err) fail(err);
+            
+            console.log("added bar");
+            
+            
+            console.log("rebuilding blast index");
+            
             blastDB.rebuild(function(err) {
                 if(err) return console.error("Error:", err);
                 

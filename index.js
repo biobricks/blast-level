@@ -53,13 +53,12 @@ function BlastLevel(db, opts) {
     this._opts = opts;
 
     this._dbs = {
+        rebuildCount: 0, // number of rebuilds completed
         'main': {
-            rebuildCount: 0, // number of rebuilds completed
             lastRebuild: 0, // number of last completed rebuild
             exists: false
         },
         'update': {
-            rebuildCount: 0,
             lastRebuild: 0,
             exists: false
         }
@@ -452,6 +451,12 @@ BlastLevel.prototype._numberToDBName = function(which, number) {
     return which + '-' + number;
 }
 
+/*
+update 1
+main 2
+update 3
+main 4
+*/
 
 // rebuild a blast db
 // which is either 'main' or 'update'
@@ -466,7 +471,7 @@ BlastLevel.prototype._rebuild = function(which, data, cb) {
     cb = cb || function(){};
 
     // give this rebuild the next available build number
-    var buildNum = ++(this._dbs[which].rebuildCount);
+    var buildNum = ++(this._dbs.rebuildCount);
 
     // generate a directory-unique db name
     var dbName = this._numberToDBName(which, buildNum);
@@ -491,20 +496,31 @@ BlastLevel.prototype._rebuild = function(which, data, cb) {
         // There may still be references to the previous current db 
         // e.g. there may be queries in progress on it, so we can't just
         // delete it right away.
-        if(buildNum > self._dbs[which].lastRebuild) {
-            self._dbName[which] = dbName;
-            var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
-            self._toDelete.push(lastName);
-            self._dbs[which].lastRebuild = buildNum;
-            self._processDeletions(); // callback doesn't have to wait for this
-            cb();
-        } else { 
+        if(!(buildNum > self._dbs[which].lastRebuild)) {
             // another more recent rebuild completed before us so our
             // rebuild is now outdated and we can delete it immediately
             // since no other references to this db will exist
             self._deleteDB(dbName); // callback doesn't have to wait for this
-            cb();
+            return cb();
         }
+
+        var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
+
+        if(self._dbs[which].exists && self._dbs[which].lastRebuild) {
+            self._attemptDelete(lastName)
+        };
+        self._dbs[which].lastRebuild = buildNum;
+
+        // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
+        if(which === 'main') {
+            console.log("--------------", self._dbs['update'].exists, buildNum, self._dbs['update'].lastRebuild);
+            if(self._dbs['update'].exists && (buildNum > self._dbs['update'].lastRebuild)) {
+                var lastUpdateName = self._numberToDBName('update', self._dbs['update'].lastRebuild);
+                self._attemptDelete(lastUpdateName)
+                self._dbs['update'].exists = false;
+            } 
+        }
+        cb();
     });
 };
 
@@ -525,6 +541,9 @@ BlastLevel.prototype._processDeletions = function(cb) {
         // This function is also called after
         // each query ends so all will be cleaned up.
         if(self._queryCount[toDelete]) return cb();
+
+        var i = self._toDelete.indexOf(toDelete);
+        self._toDelete.splice(i, 1);
 
         self._deleteDB(toDelete, cb);
     }, cb);
@@ -560,6 +579,7 @@ BlastLevel.prototype._rebuildMainDB = function(dbName, data, cb) {
         if(err) return cb(err);
 
         self._dbs['main'].exists = (count == 0) ? false : true;
+
         cb();
     });
 };
@@ -615,6 +635,10 @@ BlastLevel.prototype._queryDBs = function() {
     return dbs;
 };
 
+BlastLevel.prototype._attemptDelete = function(dbName) {
+    this._toDelete.push(dbName);
+    this._processDeletions();
+}
 
 // TODO auto-detect if amino acid or 
 BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
@@ -656,6 +680,7 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
 
     function end(err) {
         self._changeQueryCount(qdbs, -1);
+        self._processDeletions(); // callback doesn't have to wait for this
         endCb(err);
     }
     
