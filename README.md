@@ -74,19 +74,19 @@ blastDB.blast('caaaggcgaaactgtttacc', function(err, data) {
 
 blastlevel can operate in three different modes: 
 
-* blastdb: fastest search but sequence changes trigger partial/full index rebuild
-* direct: at least 2-3x slower than blastdb and puts more load on node.js + leveldb but index rebuild on sequence changes
-* streaming: ~70x slower than blastdb but results stream as they are found and are not sorted by blast. no index rebuild on sequence changes
+* blastdb: fastest search but sequence changes trigger partial BLAST db rebuild
+* direct: at least 2-3x slower than blastdb and puts more load on node.js + leveldb but no BLAST db is kept on disk at all. 
+* streaming: ~70x slower than `blastdb` but results stream as they are found and are not sorted by blast. no index rebuild on sequence changes
 
 In the `blastdb` and `direct` modes the output will be in the normal `blastn` format, meaning that a ranked list of the best matches is output to when the query is completed and nothing is output before completion. 
 
 ## blastdb
 
-`blastdb` mode keeps a native blast database in the blast database format on disk. This is the fastest option. In this mode, two blast databases are kept. A primary blast database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling .rebuild() which could be done by a cron script, and it can be triggered automatically whenever the blastlevel database is opened by setting rebuildOnOpen: true (default false). If rebuildOnChange is set to true (default false) then a single blast db is kept containing all sequence data and the entire blast database is rebuilt every time sequence data is changed.
+`blastdb` mode keeps a native BLAST database on disk. This is the fastest option. In this mode, two BLAST databases are kept. A primary BLAST database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling `.rebuild()` which could be done by a cron script, and it can be triggered automatically whenever the blastlevel database is opened by setting `rebuildOnOpen: true` (default false). If rebuildOnChange is set to true (default false) then a single BLAST db is kept containing all sequence data and the entire BLAST database is rebuilt every time sequence data is changed.
 
 ## direct
 
-`direct` mode does not keep a native blast database of the sequence data. Instead, all of the sequence data is streamed from leveldb and piped into the `blastn` command every time 
+`direct` mode does not keep a native BLAST database of the sequence data. Instead, all of the sequence data is streamed from leveldb and piped into the `blastn` command every time 
 
 ## streaming
 
@@ -136,16 +136,13 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 
 # ToDo
 
-## Critical
-
-* .batch needs to intercept put requests
-
-## Nice to have
+* unit tests
+* move to on('change') instead of AbstracLevelDown
+* implement direct mode
+* implement .batch
 
 * opts.rebuildOnOpen
 * opts.rebuildOnUpdate
-* opts.threadsPerQuery
-* Add an option for automatic triggering of BLAST database updates without causing the callbacks to wait for the BLAST database update to complete.
 
 # Future
 
@@ -221,7 +218,7 @@ It might be preferably to deal with keeping actual blast databases and letting b
 
 ## Modifying a BLAST database
 
-While makeblastdb does not support modification of an existing BLAST database, forcing a complete rebuild of the database every time it changes, it does support concatenating existing databases, and it supports the creation of single-entry databases, thus it supports appending to a database in a crude way by first creating a new database with the sequence(s) to be appended, then concatenating the resulting database to the existing database. This isn't exactly an append operation since it writes an antire new database rather than appending to the existing database but it is still likely faster than rebuilding from leveldb so I document it here in case someone finds it useful:
+While `makeblastdb` does not support modification of an existing BLAST database, forcing a complete rebuild of the database every time it changes, it does support concatenating existing databases, and it supports the creation of single-entry databases, thus it supports appending to a database in a crude way by first creating a new database with the sequence(s) to be appended, then concatenating the resulting database to the existing database. This isn't exactly an append operation since it writes an antire new database rather than appending to the existing database but it is still much faster than rebuilding from leveldb so I document it here in case someone finds it useful:
 
 ```
 # Create a new BLAST database from the sequence(s) to be "appended":
@@ -231,13 +228,21 @@ cat seq_to_append1.fasta seq_to_append2.fasta | makeblastdb -dbtype nucl -title 
 makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
 ```
 
+## BLAST symbolic concat
+
+It is possible to use the BLAST tools to create a BLAST database that simply references multiple existing databases, which makes it possible to query several databases at once as if they were a single database.
+
+```
+TODO 
+```
+
 # Operating system support
 
-This module will currently not work on windows since it depends on unix domain sockets and the `nc` utility.
+This module has only been tested on debian/ubunut linux. It will likely work on any *nix. The `direct` mode will definitely not work on windows since it depends on unix domain sockets and the `nc` utility.
 
 # Copyright and license
 
-Copyright 2016 BioBricks Foundation
+Copyright 2016-2017 BioBricks Foundation
 
 License: AGPLv3
 

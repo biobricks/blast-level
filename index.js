@@ -200,14 +200,17 @@ BlastLevel.prototype._put = function(key, value, opts, cb) {
 
 
 BlastLevel.prototype._del = function(key, opts, cb) {
-    this.db.del(key, opts, cb);
+
+  // TODO
+  throw new Error("not implemented");
+  this.db.del(key, opts, cb);
 };
 
 BlastLevel.prototype._batch = function(array, opts, cb) {
 
-    // TODO
-
-    return this.db.batch(key, opts, cb);
+  // TODO
+  throw new Error("not implemented");
+  return this.db.batch(key, opts, cb);
 };
 
 
