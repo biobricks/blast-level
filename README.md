@@ -4,10 +4,6 @@ WARNING: This is not yet working. Don't believe this documentation. Come back la
 Streaming BLAST indexes for leveldb databases. Automatically keep an up-to-date BLAST database for your leveldb sequence data and run streaming BLAST queries on the data.
 
 
-# Notes
-
-When operating in blastdb mode with rebuildOnChange:false (the default) when a sequence is deleted in leveldb the sequence is not deleted in the blast index. If a query is run that results in a hit on a deleted sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last index rebuild no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using another mode.
-
 # Dependencies
 
 Ensure that you have a recent [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download) installed on your system:
@@ -84,6 +80,8 @@ In the `blastdb` and `direct` modes the output will be in the normal `blastn` fo
 
 `blastdb` mode keeps a native BLAST database on disk. This is the fastest option. In this mode, two BLAST databases are kept. A primary BLAST database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling `.rebuild()` which could be done by a cron script, and it can be triggered automatically whenever the blastlevel database is opened by setting `rebuildOnOpen: true` (default false). If rebuildOnChange is set to true (default false) then a single BLAST db is kept containing all sequence data and the entire BLAST database is rebuilt every time sequence data is changed.
 
+When operating in blastdb mode with rebuildOnChange:false (the default) when a sequence is deleted in leveldb the sequence is not deleted in the blast index. If a query is run that results in a hit on a deleted sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last index rebuild no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using another mode.
+
 ## direct
 
 `direct` mode does not keep a native BLAST database of the sequence data. Instead, all of the sequence data is streamed from leveldb and piped into the `blastn` command every time 
@@ -95,16 +93,21 @@ In `streaming` mode `blastn` is called once for each sequence, which causes a si
 
 # API
 
+## blastLevel(db, [opts] (constructor)
+
 Constructor with all properties (defaults shown):
 
 ```
 var blastDB = blastLevel(db, {
-  sequenceKey: undefined, // key in db that stores the sequence data
-  path: undefined, // directory to use for storing BLAST db
-  autoUpdate: true, // rebuild blast database when db is changed
-  updateOnOpen: true, // rebuild blast database when db is opened
-  binPath: '', // if BLAST+ commands are not in PATH specify bin directory here
-  debug: false // enable debug output
+    mode: 'blastdb', // or 'direct' or 'streaming' (slow)
+    seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
+    path: undefined, // path to use for storing BLAST database (blastdb mode only)
+    listen: true, // listen for changes on db and update index automatically
+    rebuild: false, // rebuild the BLAST db now
+    rebuildOnChange: false, // rebuild main BLAST index whenever the db is changed
+    keepUpdateIndex: true, // keep changes since last rebuild in separate BLAST db
+    binPath: undefined, // path where BLAST+ binaries are located if not in PATH
+    debug: false // turn debug output on or off
 });
 ```
 
@@ -114,17 +117,7 @@ You can use blastDB just as you would use the leveldb database directly, but if 
 
 Note that if autoUpdate is true then operations like .put that trigger a change to the BLAST database will not call their callbacks until the BLAST update is completed. If you want to avoid this then either disable updateOnOpen or simply call the .put directly on the level database and trigger the update manually.
 
-## blastStream(query)
 
-ToDo writeme
-
-## blast(query, callback)
-
-ToDo writeme
-
-## update()
-
-Update the BLAST database based on the leveldb database. This actually writes an entirely new BLAST database, then seemlessly switches blastLevel over to the new database and deletes the old one.
 
 # Implementation
 
@@ -140,9 +133,10 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 * move to on('change') instead of AbstracLevelDown
 * implement direct mode
 * implement .batch
-
-* opts.rebuildOnOpen
-* opts.rebuildOnUpdate
+* allow seqProp to be a function or 'foo.bar.baz'
+* emit 'ready' event when initialization completes
+* implement opts.rebuildOnOpen
+* implement opts.rebuildOnUpdate
 
 # Future
 
@@ -242,7 +236,7 @@ This module has only been tested on debian/ubunut linux. It will likely work on 
 
 # Copyright and license
 
-Copyright 2016-2017 BioBricks Foundation
+Copyright 2016, 2017 BioBricks Foundation
 
 License: AGPLv3
 

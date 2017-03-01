@@ -30,249 +30,406 @@ var util = require('util');
 var path = require('path');
 var xtend = require('xtend');
 var bytewise = require('bytewise');
-var defaults = require('levelup-defaults');
 var tmp = require('tmp');
 var levelup = require('levelup');
 var through = require('through2');
 var from = require('from2');
 var async = require('async');
-var AbstractLevelDOWN = require('abstract-leveldown').AbstractLevelDOWN;
+var changes = require('level-changes');
+var EventEmitter = require('events').EventEmitter;
+
+// hash an operation
+function hash(type, key, value) {
+
+  // yes sha256 is slow but really not much slower than any other hash in node
+  // https://github.com/hex7c0/nodejs-hash-performance
+  var h = crypto.createHash('sha256');
+  
+  h.update(type);
+  h.update(key);
+  if(value) {
+    if(typeof value === 'object' && !Buffer.isBuffer(value)) {
+      h.update(JSON.stringify(value));
+    } else {
+      h.update(value);
+    }
+  }
+
+  return h.digest('base64');
+}
+
+// resolve a path like ['foo', 'bar', 'baz']
+// to return the value of obj.foo.bar.baz
+// or undefined if that path does not exist
+function resolvePropPath(obj, path) {
+
+  if(path.length > 1) {
+    if(!obj[path[0]]) return undefined;
+
+    return resolvePropPath(obj[path[0]], path.slice(1, path.length));
+  }
+
+  if(path.length === 1) {
+    return obj[path[0]];
+  }
+
+  return undefined;
+}
 
 function BlastLevel(db, opts) {
-    if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
+  if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
-    opts = xtend({
-        mode: 'blastdb', // or 'direct' or 'streaming' (slow)
-        rebuildOnOpen: false, // rebuild the BLAST index when dbs is opened
-        rebuildOnChange: false, // rebuild the main BLAST index whenever the db is changed
-        keepUpdateIndex: true, // keep changes since last rebuild in separate BLAST index
-        binPath: '', // path where BLAST+ binaries are located in not in PATH
-        threadsPerQuery: 1, // TODO how many threads (CPUs) to use for a single query 
-        debug: false // turn debug output on or off
-    }, opts);
-    this._opts = opts;
+  opts = xtend({    
+    mode: 'blastdb', // or 'direct' or 'streaming' (slow)
+    seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
+    path: undefined, // path to use for storing BLAST database (blastdb mode only)
+    listen: true, // listen for changes on db and update index automatically
+    rebuild: false, // rebuild the BLAST index now
+    rebuildOnChange: false, // rebuild the main BLAST index whenever the db is changed
+    keepUpdateIndex: true, // keep changes since last rebuild in separate BLAST index
+    binPath: undefined, // path where BLAST+ binaries are located if not in PATH
+    debug: false // turn debug output on or off
+  }, opts);
+  this.opts = opts;
 
-    this._dbs = {
-        rebuildCount: 0, // number of rebuilds completed
-        'main': {
-            lastRebuild: 0, // number of last completed rebuild
-            exists: false
-        },
-        'update': {
-            lastRebuild: 0,
-            exists: false
-        }
-    };
+  this._queryCount = {}; // number of active queries for each db, indexed by name
+  this._toDelete = [];
 
-    this._queryCount = {}; // number of active queries for each db, indexed by name
-    this._toDelete = [];
 
-    if(!opts.sequenceKey) {
-        throw new Error("opts.sequenceKey must be specified");
+  if(opts.mode === 'blastdb' && !opts.path) {
+    throw new Error("opts.path must be specified in 'blastdb' mode");
+  }
+
+  if(!db) {
+    throw new Error("First argument must be a level instance");
+  }
+
+  this._dbOpts = {
+    keyEncoding: 'utf8', 
+    valueEncoding: 'json'
+  };
+
+  this.db = db; // leveldb instance
+
+  this._ignoreList = {};
+  this._ignoreCount = 0;
+
+  // BLAST databases
+  this._dbs = {
+    rebuildCount: 0, // number of rebuilds completed
+    'main': {
+      lastRebuild: 0, // number of last completed rebuild
+      exists: false
+    },
+    'update': {
+      lastRebuild: 0,
+      exists: false
     }
-    this._key = opts.sequenceKey;
+  };
 
-    if(!opts.path) {
-        throw new Error("opts.path must be specified");
-    }
-    this._path = opts.path;
+  if(this.opts.listen) {
+    this.c = changes(this.db);
+    this.c.on('data', function(change) {
+      if(this._shouldIgnore(change)) return;
+      if(change.type === 'put') {
+        this._onPut(change.key, change.value);
+      } else { // del
+        this._onDel(change.key);
+      }
+    }.bind(this));
+  }    
 
-    if(!db || !db.location) {
-        throw new Error("First argument must be a level instance");
-    }
+  // ----------- init
 
-    this._dbOpts = {
-        keyEncoding: 'utf8', 
-        valueEncoding: 'json'
-    };
 
-    AbstractLevelDOWN.call(this, db.location);
-    this.db = defaults(db, this._dbOpts);
-}
-
-util.inherits(BlastLevel, AbstractLevelDOWN);
-
-BlastLevel.prototype._open = function(opts, cb) {
+  this._init = function() {
     var self = this;
 
-    function doesBlastDBExist(dbName, cb) {
-        var dbPath = path.join(self._path, dbName+'.nin');
-        fs.stat(dbPath, function(err, stats) {
-            if(err) {
-                if(err.code == 'ENOENT') {
-                    return cb(null, false);
-                } else {
-                    return cb(err);
-                }
-            }
-            if(!stats.isFile()) {
-                return cb(new Error("Blast DB file isn't a file: " + dbPath));
-            }
-            cb(null, true);
-        });
+    function cb(err) {
+      if(err) return self.emit('error', err);
+      self.emit('ready');
     }
 
-    function checkDB(which, create, cb) {
-        var dbName = self._dbName(which);
+    if(this.opts.rebuild) return this._rebuild('main', cb);
+  
+    self._checkDB('main', true, function(err) {
+      if(err) return cb(err);
+      self._checkDB('update', false, cb);
+    });
+  };
 
-        fs.stat(self._path, function(err, stats) {
-            if(err) {
-                if(err.code === 'ENOENT') {
-                    fs.mkdir(self._path, function(err) {
-                        if(err) return cb(err);
-                        if(!create) return cb()
-                        self._rebuild(which, cb);
-                    });
-                    return;
-                } else {
-                    return cb(err);
-                }
-            }
 
-            if(!stats.isDirectory()) {
-                return cb(new Error("Specified path must be a directory"));
-            }
+  // ----------- methods below
 
-            doesBlastDBExist(dbName, function(err, exists) {
-                if(err) return cb(err);
-                if(exists) {
-                    self._dbs[which].exists = true;
-                    return cb();
-                }
-                if(!create) return cb()
-                self._rebuild(dbName, cb);
-            });
-        });
+  // Ignore the next time this operation occurs.
+  // Used by this._put, this._del and this._batch
+  this._ignore = function(type, key, value) {
+    var h = hash(type, key, value);
+    if(this._ignoreList[h]) {
+      this._ignoreList[h]++;
+    } else {
+      this._ignoreList[h] = 1;
     }
+    this._ignoreCount++;
+  };
 
-    function opened(opts, cb) {
-        if(self._opts.rebuildOnOpen) return self._rebuild('main', cb);
+  // check if we should ignore this operation
+  // and remove from ignore list
+  this._shouldIgnore = function(op) {
 
-        checkDB('main', self._opts.rebuildOnOpen, function(err) {
-            if(err) return cb(err);
-            checkDB('update', false, cb);
-        });
+    if(this._ignoreCount <= 0) return;
+    var h = hash(op.type, op.key, op.value);
+
+    if(this._ignoreList[h]) {
+      if(this._ignoreList[h] === 1) {
+        delete this._ignoreList[h];
+      } else {
+        this._ignoreList[h]--;
+      }
+      this._ignoreCount--;
+      return true;
     }
+    return false;
+  };
+  
+  this._resolvePropPath = function(value, pathOrFunc) {
+    if(typeof pathOrFunc === 'function') return pathOrFunc(value);
 
-    if(this.db.isOpen()) {
-        return opened(opts, cb)
+    if(typeof pathOrFunc === 'string') {
+      return resolvePropPath(value, pathOrFunc.split('.'));
     }
     
-    this.db.on('open', this.open.bind(this, opts, cb));
-
-//    tmp.dir(function _tempDirCreated(err, path, cleanupCallback) {
-};
-
-BlastLevel.prototype._close = function(cb) {
-    this.db.close(cb);
-};
-
-
-BlastLevel.prototype._get = function(key, opts, cb) {
-    this.db.get(key, opts, cb);
-};
-
-// get the sequence data from a leveldb value
-BlastLevel.prototype._seqFromVal = function(val) {
-    return val[this._key];
-}
-
-BlastLevel.prototype._put = function(key, value, opts, cb) {
-    var self = this;
-
-    if(!this._opts.rebuildOnChange) {
-        var val = JSON.parse(value);
-        return this.db.put(key, val, opts, function(err) {
-            if(err) return cb(err);
-            if(self._opts.keepUpdateIndex) {
-                self._rebuild('update', {key: key, value: val}, cb);
-            } else {
-                cb();
-            }
-        });
+    if(pathOrFunc instanceof Array) {
+      return resolvePropPath(value, pathOrFunc);
     }
 
+    throw new Error("Value must be string, array or function");
+  };
+  
+
+  this._onPut = function(key, value, cb) {
+    cb = cb || function(){};    
+  };
+  
+  this._onDel = function(key, cb) {
+    cb = cb || function(){};
+  };
+
+
+  this._doesBlastDBExist = function(dbName, cb) {
+    var self = this;
+
+    var dbPath = path.join(self.opts.path, dbName+'.nin');
+    fs.stat(dbPath, function(err, stats) {
+      if(err) {
+        if(err.code == 'ENOENT') {
+          return cb(null, false);
+        } else {
+          return cb(err);
+        }
+      }
+      if(!stats.isFile()) {
+        return cb(new Error("Blast DB file isn't a file: " + dbPath));
+      }
+      cb(null, true);
+    });
+  };
+
+  this._checkDB = function(which, create, cb) {
+    var self = this;
+
+    var dbName = this._dbName(which);
+        console.log("AAAAAAAAAAAAA", dbName, which);
+
+    fs.stat(self.opts.path, function(err, stats) {
+      if(err) {
+        if(err.code === 'ENOENT') {
+          fs.mkdir(self.opts.path, function(err) {
+            if(err) return cb(err);
+            if(!create) return cb()
+            self._rebuild(which, cb);
+          });
+          return;
+        } else {
+          return cb(err);
+        }
+      }
+
+      if(!stats.isDirectory()) {
+        return cb(new Error("Specified path must be a directory"));
+      }
+
+      self._doesBlastDBExist(dbName, function(err, exists) {
+        if(err) return cb(err);
+        if(exists) {
+          self._dbs[which].exists = true;
+          return cb();
+        }
+        if(!create) return cb()
+        self._rebuild(dbName, cb);
+      });
+    });
+  }
+
+  // rebuild a blast db
+  // which is either 'main' or 'update'
+  // data is optionally a single {key: ..., value: ...} object
+  // to build the database from
+  this._rebuild = function(which, data, cb) {
+    console.log("WHICH", which)
+
+    if(typeof data === 'function') {
+      cb = data;
+      data = null;
+    }
+    var self = this;
+    cb = cb || function(){};
+    
+    // give this rebuild the next available build number
+    var buildNum = ++(this._dbs.rebuildCount);
+    
+    // generate a directory-unique db name
+    var dbName = this._numberToDBName(which, buildNum);
+    
+    // pick the function to actually call to rebuild
+    // based on whether we're rebuilding the 'main' or 'update' db
+    var f;
+    if(which === 'main') {
+      f = this._rebuildMainDB.bind(this);
+    } else { // 'update'
+      f = this._rebuildUpdateDB.bind(this);
+    }
+    
+    f(dbName, data, function(err) {
+      if(err) return cb(err);
+      
+      // if this build's number is greater than the number of the
+      // most recently completed rebuild then we know our rebuild
+      // is newer than the previous rebuild so we can safely
+      // move the current db reference to point to the db we just built
+      // and mark the "previous current" db for deletion
+      // There may still be references to the previous current db 
+      // e.g. there may be queries in progress on it, so we can't just
+      // delete it right away.
+
+      if(!(buildNum > self._dbs[which].lastRebuild)) {
+        // another more recent rebuild completed before us so our
+        // rebuild is now outdated and we can delete it immediately
+        // since no other references to this db will exist
+        self._deleteDB(dbName); // callback doesn't have to wait for this
+      return cb();
+      }
+      
+      var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
+      
+      if(self._dbs[which].exists && self._dbs[which].lastRebuild) {
+        self._attemptDelete(lastName)
+      };
+      self._dbs[which].lastRebuild = buildNum;
+      
+      // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
+      if(which === 'main') {
+        console.log("--------------", self._dbs['update'].exists, buildNum, self._dbs['update'].lastRebuild);
+        if(self._dbs['update'].exists && (buildNum > self._dbs['update'].lastRebuild)) {
+          var lastUpdateName = self._numberToDBName('update', self._dbs['update'].lastRebuild);
+          self._attemptDelete(lastUpdateName)
+          self._dbs['update'].exists = false;
+        } 
+      }
+      cb();
+    });
+  };
+
+
+  // get the sequence data from a leveldb value
+  this._seqFromVal = function(val) {
+    return val[this.opts.seqProp];
+  }
+  
+  this._put = function(key, value, opts, cb) {
+    var self = this;
+    
+    if(!this.opts.rebuildOnChange) {
+      var val = JSON.parse(value);
+      return this.db.put(key, val, opts, function(err) {
+        if(err) return cb(err);
+        if(self.opts.keepUpdateIndex) {
+          self._rebuild('update', {key: key, value: val}, cb);
+        } else {
+          cb();
+        }
+      });
+    }
+    
     var self = this;
     this.db.put(key, JSON.parse(value), opts, function(err) {
-        self._rebuild('main', cb);
+      self._rebuild('main', cb);
     });
-};
+    
+  };
+  
 
+  this._del = function(key, opts, cb) {
+    
+    // TODO
+    throw new Error("not implemented");
+    this.db.del(key, opts, cb);
+  };
 
-BlastLevel.prototype._del = function(key, opts, cb) {
+  this._batch = function(array, opts, cb) {
+    
+    // TODO
+    throw new Error("not implemented");
+    return this.db.batch(key, opts, cb);
+  };
 
-  // TODO
-  throw new Error("not implemented");
-  this.db.del(key, opts, cb);
-};
+  this.get = function(key, opts, cb) {
+    // TODO
+    throw new Error("not implemented");
+  };
 
-BlastLevel.prototype._batch = function(array, opts, cb) {
-
-  // TODO
-  throw new Error("not implemented");
-  return this.db.batch(key, opts, cb);
-};
-
-
-BlastLevel.prototype._debug = function(msg) {
-    if(!this._opts.debug) return;
+  this._debug = function(msg) {
+    if(!this.opts.debug) return;
     console.log('[debug]', msg);
-};
+  };
 
 
-BlastLevel.prototype._changeQueryCount = function(names, num) {
+  this._changeQueryCount = function(names, num) {
     if(!(names instanceof Array)) {
-        names = [names];
+      names = [names];
     }
     var i;
     for(i=0; i < names.length; i++) {
-        if(this._queryCount[names[i]]) {
-            this._queryCount[names[i]] += num;
-        } else {
-            this._queryCount[names[i]] = num;
-        }
+      if(this._queryCount[names[i]]) {
+        this._queryCount[names[i]] += num;
+      } else {
+        this._queryCount[names[i]] = num;
+      }
     }
-};
+  };
 
-/*
-BlastLevel.prototype._createBlastDB = function(dbName, cb) {
-    var self = this;
 
-    self._debug("Running _createBlastDB for", dbName);
-
-    self.__createBlastDB(dbName, function(err, count) {
-        if(err) return cb(err);
-        if(count == 0) {
-            self._dbState[dbName] = false;
-        } else {
-            self._dbState[dbName] = true;
-        }
-        cb();
-    });
-}
-*/
-
-// Builds a blast db from all sequences in the leveldb instance
-// or from a specified readable stream
-// callback gives back args:
-//   err
-//   count: number of sequences added to database
-// If count is 0 then no database was created since makeblastdb
-// will not create empty databases
-// Set opts.stream to a stream outputting FASTA sequences 
-// or a stream will be created outputting all sequences in the level db
-BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
+  // Builds a blast db from all sequences in the leveldb instance
+  // or from a specified readable stream
+  // callback gives back args:
+  //   err
+  //   count: number of sequences added to database
+  // If count is 0 then no database was created since makeblastdb
+  // will not create empty databases
+  // Set opts.stream to a stream outputting FASTA sequences 
+  // or a stream will be created outputting all sequences in the level db
+  this._createBlastDB = function(name, opts, cb) {
     var self = this;
 
     if(typeof opts === 'function') {
-        cb = opts;
-        opts = {};
+      cb = opts;
+      opts = {};
     }
     
-    var dbPath = path.join(self._path, name);
+    var dbPath = path.join(self.opts.path, name);
     console.log("CREATING", dbPath);
 
-    var cmd = path.join(this._opts.binPath, "makeblastdb");
+    var cmd = path.join(this.opts.binPath, "makeblastdb");
     var args = ["-dbtype", "nucl", "-title", "'blastlevel'", "-out", dbPath];
     
     var makedb = spawn(cmd, args);
@@ -280,9 +437,9 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     var seqStream = this._seqStream();
 
     if(opts.stream) {
-        opts.stream.pipe(seqStream);
+      opts.stream.pipe(seqStream);
     } else {
-        this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
+      this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
     }
 
     seqStream.pipe(makedb.stdin);
@@ -294,377 +451,218 @@ BlastLevel.prototype._createBlastDB = function(name, opts, cb) {
     var addedCount = 0;
     var str, m;
     makedb.stdout.on('data', function(data) {
-        str = data.toString();
-        self._debug("[makeblastdb] " + str);
-        m = str.match(/added (\d+) sequences in/);
-        if(!m) return;
-        addedCount = parseInt(m[1]);
+      str = data.toString();
+      self._debug("[makeblastdb] " + str);
+      m = str.match(/added (\d+) sequences in/);
+      if(!m) return;
+      addedCount = parseInt(m[1]);
     });
 
     // TODO act on makedb.close instead!
     makedb.stdout.on('close', function() {
-        stdoutClosed = true;
-        if(stderrClosed) {
-            stderr = stderr ? new Error(stderr) : undefined;
-            cb(stderr, addedCount)
-        }
+      stdoutClosed = true;
+      if(stderrClosed) {
+        stderr = stderr ? new Error(stderr) : undefined;
+        cb(stderr, addedCount)
+      }
     });
 
 
     makedb.stderr.on('data', function(data) {
-        stderr += data.toString();
+      stderr += data.toString();
     });    
     
     makedb.stderr.on('close', function() {
-        // Ignore "no sequences added" errors
-        m = stderr.match(/No sequences added/i);
-        if(m) stderr = '';
-        stderrClosed = true;
-        if(stdoutClosed) {
-            stderr = stderr ? new Error(stderr) : undefined;
-            cb(stderr, addedCount)
-        }
+      // Ignore "no sequences added" errors
+      m = stderr.match(/No sequences added/i);
+      if(m) stderr = '';
+      stderrClosed = true;
+      if(stdoutClosed) {
+        stderr = stderr ? new Error(stderr) : undefined;
+        cb(stderr, addedCount)
+      }
     });
-};
+  };
 
-// Take a leveldb entry object (with .key and .value) 
-// and turn it into fasta-formatted output that can be
-// referenced back to the leveldb entry
-BlastLevel.prototype._fastaFormat = function(data) {
+  // Take a leveldb entry object (with .key and .value) 
+  // and turn it into fasta-formatted output that can be
+  // referenced back to the leveldb entry
+  this._fastaFormat = function(data) {
     var line = "> id:" + data.key + "\n" + this._seqFromVal(data.value) + "\n";
     return line;
-};
+  };
 
-
-// Takes as input the output from blastn of one result
-// Gets the levedb entry for the result and calls callback with args:
-//   err
-//   id (leveldb key)
-//   leveldb value
-//   blastn query result
-BlastLevel.prototype._blastnParse = function(result, cb) {
-    var m = result.match(/^>\s+id:([^\s]+)/)
-    if(!m) return cb("Invalid blastn query result");
-
-    var id = m[1];
-    this.db.get(id, function(err, val) {
-        if(err) return cb(err);
-        cb(null, id, val, result);
-    });
-};
-
-
-// parse blastn result stream
-// resultCb is called for each result with args:
-//   id (leveldb key)
-//   leveldb value
-//   blastn query result
-// endCb is called when stream ends or on error with:
-//   err
-//   resultCount: number of parsed results
-BlastLevel.prototype._blastnParseStream = function(stream, resultCb, endCb) {
+  // create stream of sequences
+  this._seqStream = function() {
     var self = this;
-    var buffer = '';
-    var count = 0;
-
-    var m;
-    var indexes = [];
-    var result;
-    var didErr = false;
-
-    function loopWhile(cb) {
-        m = buffer.match(/^>/g);
-        if(!m) return cb();
-        console.log('!!!', m);
-        indexes.push(m.index);
-        if(indexes.length < 2) return loopWhile(cb);
-
-        result = buffer.substring(indexes[0], indexes[1]-1);            
-        buffer = buffer.substring(indexes[1]);
-
-        indexes = [];
-        count++;
-
-        self._blastnParse(result, function(err, id, val, result) {
-            if(err) {
-                didErr = true;
-                return endCb(err);
-            }
-            resultCb(id, val, result);
-            loopWhile(cb);
-        });
-
-    }
-
-    stream.pipe(through(function(data, enc, cb) {
-        buffer += data.toString();
-        loopWhile(cb);
-    }));
-
-    stream.on('end', function() {
-        if(didErr) return;
-        var m = buffer.match(/^>/m);
-        if(!m) return endCb(null, count)
-
-        var result = buffer.substring(m.index);
-        count++;
-
-        // TODO check for "Effective search space used" to cut off ending
-
-        self._blastnParse(result, function(err, id, val, result) {
-            resultCb(id, val, result);
-            endCb(null, count);
-        })
-    });
-}
-
-
-// create stream of sequences
-BlastLevel.prototype._seqStream = function() {
-    var self = this;
-
+    
     var seqStream = through.obj(function(data, enc, cb) {
-        console.log(data);
-        if(data.value && self._seqFromVal(data.value)) {
-            this.push(self._fastaFormat(data));
-        }
-        cb();
+      console.log(data);
+      if(data.value && self._seqFromVal(data.value)) {
+        this.push(self._fastaFormat(data));
+      }
+      cb();
     });
-
+    
     return seqStream;
-};
+  };
 
-// do any blast databases currently exist?
-BlastLevel.prototype._hasBlastDBs = function() {
+  // do any blast databases currently exist?
+  this._hasBlastDBs = function() {
     if(this._dbs['main'].exists || this._dbs['update'].exists) {
-        return true;
+      return true;
     }
     return false;
-}
+  };
 
-
-// name of current db
-BlastLevel.prototype._dbName = function(which) {
+  // name of current db
+  this._dbName = function(which) {
     if(!this._dbs[which].exists) return null;
     return this._numberToDBName(which, this._dbs[which].lastRebuild);
-}
+  };
 
-
-BlastLevel.prototype._numberToDBName = function(which, number) {
+  this._numberToDBName = function(which, number) {
     return which + '-' + number;
-}
+  };
 
-/*
-update 1
-main 2
-update 3
-main 4
-*/
-
-// rebuild a blast db
-// which is either 'main' or 'update'
-// data is optionally a single {key: ..., value: ...} object
-// to build the database from
-BlastLevel.prototype._rebuild = function(which, data, cb) {
-    if(typeof data === 'function') {
-        cb = data;
-        data = null;
-    }
+  // delete all dbs that are queued for deletion and
+  // which no longer have any running queries
+  this._processDeletions = function(cb) {
     var self = this;
-    cb = cb || function(){};
-
-    // give this rebuild the next available build number
-    var buildNum = ++(this._dbs.rebuildCount);
-
-    // generate a directory-unique db name
-    var dbName = this._numberToDBName(which, buildNum);
-
-    // pick the function to actually call to rebuild
-    // based on whether we're rebuilding the 'main' or 'update' db
-    var f;
-    if(which === 'main') {
-        f = this._rebuildMainDB.bind(this);
-    } else { // 'update'
-        f = this._rebuildUpdateDB.bind(this);
-    }
     
-    f(dbName, data, function(err) {
-        if(err) return cb(err);
-        
-        // if this build's number is greater than the number of the
-        // most recently completed rebuild then we know our rebuild
-        // is newer than the previous rebuild so we can safely
-        // move the current db reference to point to the db we just built
-        // and mark the "previous current" db for deletion
-        // There may still be references to the previous current db 
-        // e.g. there may be queries in progress on it, so we can't just
-        // delete it right away.
-        if(!(buildNum > self._dbs[which].lastRebuild)) {
-            // another more recent rebuild completed before us so our
-            // rebuild is now outdated and we can delete it immediately
-            // since no other references to this db will exist
-            self._deleteDB(dbName); // callback doesn't have to wait for this
-            return cb();
-        }
-
-        var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
-
-        if(self._dbs[which].exists && self._dbs[which].lastRebuild) {
-            self._attemptDelete(lastName)
-        };
-        self._dbs[which].lastRebuild = buildNum;
-
-        // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
-        if(which === 'main') {
-            console.log("--------------", self._dbs['update'].exists, buildNum, self._dbs['update'].lastRebuild);
-            if(self._dbs['update'].exists && (buildNum > self._dbs['update'].lastRebuild)) {
-                var lastUpdateName = self._numberToDBName('update', self._dbs['update'].lastRebuild);
-                self._attemptDelete(lastUpdateName)
-                self._dbs['update'].exists = false;
-            } 
-        }
-        cb();
-    });
-};
-
-
-// delete all dbs that are queued for deletion and
-// which no longer have any running queries
-BlastLevel.prototype._processDeletions = function(cb) {
-    var self = this;
-
     if(this._toDelete.length <= 0) {
-        if(cb) process.nextTick(cb);
-        return;
+      if(cb) process.nextTick(cb);
+      return;
     }
     cb = cb || function(){};
 
     async.each(this._toDelete, function(toDelete, cb) {
-        // Don't delete dbs that still have active queries.
-        // This function is also called after
-        // each query ends so all will be cleaned up.
-        if(self._queryCount[toDelete]) return cb();
+      // Don't delete dbs that still have active queries.
+      // This function is also called after
+      // each query ends so all will be cleaned up.
+      if(self._queryCount[toDelete]) return cb();
 
-        var i = self._toDelete.indexOf(toDelete);
-        self._toDelete.splice(i, 1);
+      var i = self._toDelete.indexOf(toDelete);
+      self._toDelete.splice(i, 1);
 
-        self._deleteDB(toDelete, cb);
+      self._deleteDB(toDelete, cb);
     }, cb);
-};
+  };
 
-BlastLevel.prototype._deleteDB = function(name, cb) {
+  this._deleteDB = function(name, cb) {
     cb = cb || function(){};
     var exts = [
-        'nhr',
-        'nin',
-        'nnd',
-        'nni',
-        'nsd',
-        'nsi',
-        'nsq'
+      'nhr',
+      'nin',
+      'nnd',
+      'nni',
+      'nsd',
+      'nsi',
+      'nsq'
     ];
     var self = this;
-
+    
     async.each(exts, function(ext, cb) {
-        fs.unlink(path.join(self._path, name+'.'+ext), cb);
+      fs.unlink(path.join(self.opts.path, name+'.'+ext), cb);
     }, function(err) {
-        if(err) return cb(err);
+      if(err) return cb(err);
     });
-};
+  };
 
 
 
-// this function ignore the data argument for now
-BlastLevel.prototype._rebuildMainDB = function(dbName, data, cb) {
+  // this function ignore the data argument for now
+  this._rebuildMainDB = function(dbName, data, cb) {
     var self = this;
-
+    
     this._createBlastDB(dbName, function(err, count) {
-        if(err) return cb(err);
-
-        self._dbs['main'].exists = (count == 0) ? false : true;
-
-        cb();
+      if(err) return cb(err);
+      
+      self._dbs['main'].exists = (count == 0) ? false : true;
+      
+      cb();
     });
-};
+  };
 
-// create a stream that emits the single object: data
-BlastLevel.prototype._singleObjectStream = function(data) {
+  // create a stream that emits the single object: data
+  this._singleObjectStream = function(data) {
     var done = false;
     // create a stream that emits a single object and closes
     return from.obj(function(size, next) {
-        if(done) return next(null, null);
-        done = true;    
-        next(null, data);
+      if(done) return next(null, null);
+      done = true;    
+      next(null, data);
     });
-};
+  };
 
-BlastLevel.prototype._rebuildUpdateDB = function(dbName, data, cb) {
+  this._rebuildUpdateDB = function(dbName, data, cb) {
     var self = this;
-
+    
     if(!this._dbs['update'].exists) {
-        // build update db from single sequence
-        // data should have data.key and data.value
-
-        var s = this._singleObjectStream(data);
-
-        this._createBlastDB(dbName, {stream: s}, function(err) {
-            if(err) return cb(err);
-
-            self._dbs['update'].exists = true;
-            cb();
-        });
+      // build update db from single sequence
+      // data should have data.key and data.value
+      
+      var s = this._singleObjectStream(data);
+      
+      this._createBlastDB(dbName, {stream: s}, function(err) {
+        if(err) return cb(err);
         
-
+        self._dbs['update'].exists = true;
+        cb();
+      });
+      
+      
     } else {
-        throw new Error("TODO not implemented");
-        /*
-          Should use BLAST concat:
-          
-          makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
-          
-          and blastdb_aliastool (or can you pass multiple dbs to blastn?)
-          
-        */
+      throw new Error("TODO not implemented");
+      /*
+        Should use BLAST concat:
+        
+        makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
+        
+        and blastdb_aliastool (or can you pass multiple dbs to blastn?)
+        
+      */
     }
-};
+  };
 
-// get db name(s) to use for queries
-BlastLevel.prototype._queryDBs = function() {
+  // get db name(s) to use for queries
+  this._queryDBs = function() {
     var maindb = this._dbName('main');
     var updatedb = this._dbName('update');
     var dbs = [];
     if(maindb) dbs.push(maindb);
     if(updatedb) dbs.push(updatedb);
     return dbs;
-};
+  };
+  
 
-BlastLevel.prototype._attemptDelete = function(dbName) {
+  this._attemptDelete = function(dbName) {
     this._toDelete.push(dbName);
     this._processDeletions();
-}
+  };
 
-// TODO auto-detect if amino acid or 
-BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
+  // TODO auto-detect if amino acid or nucleotides
+  this.query = function(seq, opts, resultCb, endCb) {
     var self = this;
     if(typeof opts === 'function') {
-        endCb = resultCb;
-        resultCb = opts;
-        opts = {};
+      endCb = resultCb;
+      resultCb = opts;
+      opts = {};
     }
     if(!self._hasBlastDBs()) {
-        return endCb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
+      return endCb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
     }
 
     opts = xtend({
-        type: undefined, // or 'blastn' or 'blastp'. auto-detects if undefined
+      type: undefined, // or 'blastn' or 'blastp'. auto-detects if undefined
     }, opts || {});
 
     if(!opts.type) {
-        if(seq.match(/[^ACGT\s]/i)) {
-            opts.type = 'blastp';
-        } else {
-            opts.type = 'blastn';
-        }
+      if(seq.match(/[^ACGT\s]/i)) {
+        opts.type = 'blastp';
+      } else {
+        opts.type = 'blastn';
+      }
     }
 
     var qdbs =  this._queryDBs();
@@ -674,23 +672,23 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
     var cmd, args;
 
     if(opts.type === 'blastn') {
-        cmd = path.join(this._opts.binPath, "blastn");
-        args = ["-task", "blastn-short", "-db", dbName];
+      cmd = path.join(this.opts.binPath, "blastn");
+      args = ["-task", "blastn-short", "-db", dbName];
     } else {
-        // TODO support blastp
-        throw new Error("blastp not implemented");
+      // TODO support blastp
+      throw new Error("blastp not implemented");
     }
 
     function end(err) {
-        self._changeQueryCount(qdbs, -1);
-        self._processDeletions(); // callback doesn't have to wait for this
-        endCb(err);
+      self._changeQueryCount(qdbs, -1);
+      self._processDeletions(); // callback doesn't have to wait for this
+      endCb(err);
     }
     
 
-//    console.log("CMD", cmd, args.join(' '));
+    //    console.log("CMD", cmd, args.join(' '));
     var blast = spawn(cmd, args, {
-        cwd: this._path
+      cwd: this.opts.path
     });
 
     var stdoutClosed = false;
@@ -698,79 +696,60 @@ BlastLevel.prototype.query = function(seq, opts, resultCb, endCb) {
     var stderr = '';
 
     blast.stdout.on('data', function(str) {
-        self._debug("["+opts.type+" stdout] " + str);
+      self._debug("["+opts.type+" stdout] " + str);
     });
 
     blast.stderr.on('data', function(data) {
-        stderr += data.toString();
+      stderr += data.toString();
     });    
     
 
     blast.on('close', function(code) {
-        cmdClosed = true;
-        if(code) {
-            stderr = stderr || "blast command exited with non-zero exit code";
-        }
-        if(!stdoutClosed) return;
+      cmdClosed = true;
+      if(code) {
+        stderr = stderr || "blast command exited with non-zero exit code";
+      }
+      if(!stdoutClosed) return;
 
-        if(stderr) return end(new Error(stderr));
-        end();
+      if(stderr) return end(new Error(stderr));
+      end();
     });
     self._blastnParseStream(blast.stdout, function(dbKey, dbVal, result) {
-        resultCb({
-            key: dbKey,
-            value: dbVal
-        });
+      resultCb({
+        key: dbKey,
+        value: dbVal
+      });
     }, function(err, count) {
-        stdoutClosed = true;
-        if(err) {
-            stderr = err.message + "\n" + stderr;
-        }
-        if(!cmdClosed) return;
+      stdoutClosed = true;
+      if(err) {
+        stderr = err.message + "\n" + stderr;
+      }
+      if(!cmdClosed) return;
 
-        if(stderr) return end(new Error(stderr));
-        end();
+      if(stderr) return end(new Error(stderr));
+      end();
     });
 
 
     blast.stdin.on('error', function(err) {
-        // these error messages are rarely useful
-        // and are accompanied by more useful .stderr messages
-        // so just make sure they're handled and throw away the message
+      // these error messages are rarely useful
+      // and are accompanied by more useful .stderr messages
+      // so just make sure they're handled and throw away the message
     });
 
 
     blast.stdin.end(seq, 'utf8');
 
-};
+  };
 
-BlastLevel.prototype.rebuild = function(cb) {
+  this.rebuild = function(cb) {
     this._rebuild('main', cb);
+  };
+
+
+  this._init();
 };
 
+util.inherits(BlastLevel, EventEmitter);
 
-module.exports = function(db, opts) {
-
-    var blastLevel;
-
-    function getInstance(db, opts2) {
-        blastLevel = new BlastLevel(db, opts);
-        return blastLevel;
-    }
-
-    opts = xtend({
-        db: getInstance,
-        keyEncoding: 'utf8',
-        valueEncoding: 'json'
-    }, opts || {});
-
-
-    var lup = levelup(db, opts);
-
-    // expose non-leveldb functions
-    lup.query = blastLevel.query.bind(blastLevel);
-    lup.rebuild = blastLevel.rebuild.bind(blastLevel);
-
-
-    return lup;
-};
+module.exports = BlastLevel;

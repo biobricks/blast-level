@@ -6,7 +6,7 @@ var blastLevel = require('../index.js');
 var db = level('/tmp/mydb', {valueEncoding: 'json'});
 
 var blastDB = blastLevel(db, {
-    sequenceKey: 'seq', // key in 'mydb' that stores the sequence data
+    seqProp: 'seq', // key in 'mydb' that stores the sequence data
     path: '/tmp/blastdb', // directory to use for storing BLAST db
     rebuildOnOpen: false, // rebuild the BLAST index when the db is opened
     rebuildOnChange: false, // rebuild the BLAST index whenever the db is updated
@@ -28,7 +28,7 @@ function fail(err) {
     process.exit(1);
 }
 
-blastDB.put('foo-'+r(), {
+db.put('foo-'+r(), {
     seq: "GATTACACATTACA"
 }, function(err) {
     if(err) fail(err);
@@ -40,7 +40,7 @@ blastDB.put('foo-'+r(), {
     blastDB.rebuild(function(err) {
         if(err) return console.error("Error:", err);
         
-        blastDB.put('bar-'+r(), {
+        db.put('bar-'+r(), {
             seq: "CATCATCATATTACACATTACCATCATCAT"
         }, function(err) {
             if(err) fail(err);
