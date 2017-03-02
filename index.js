@@ -25,6 +25,7 @@
 */
 
 var spawn = require('child_process').spawn;
+var exec = require('child_process').exec;
 var fs = require('fs');
 var util = require('util');
 var path = require('path');
@@ -83,10 +84,10 @@ function BlastLevel(db, opts) {
     mode: 'blastdb', // or 'direct' or 'streaming' (slow)
     seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
     path: undefined, // path to use for storing BLAST database (blastdb mode only)
-    listen: true, // listen for changes on db and update index automatically
+    listen: true, // listen for changes on db and update db automatically
     rebuild: false, // rebuild the BLAST index now
-    rebuildOnChange: false, // rebuild the main BLAST index whenever the db is changed
-    keepUpdateIndex: true, // keep changes since last rebuild in separate BLAST index
+    rebuildOnChange: false, // rebuild the main BLAST db whenever the db is changed
+    useUpdateDB: true, // keep changes since last rebuild in separate BLAST db
     binPath: undefined, // path where BLAST+ binaries are located if not in PATH
     debug: false // turn debug output on or off
   }, opts);
@@ -149,10 +150,8 @@ function BlastLevel(db, opts) {
       if(err) return self.emit('error', err);
       self.emit('ready');
     }
-
-    if(this.opts.rebuild) return this._rebuild('main', cb);
   
-    self._checkDB('main', true, function(err) {
+    self._checkDB('main', this.opts.rebuild, function(err) {
       if(err) return cb(err);
       self._checkDB('update', false, cb);
     });
@@ -238,8 +237,7 @@ function BlastLevel(db, opts) {
   this._checkDB = function(which, create, cb) {
     var self = this;
 
-    var dbName = this._dbName(which);
-        console.log("AAAAAAAAAAAAA", dbName, which);
+    var dbName = this._dbName(which, true);
 
     fs.stat(self.opts.path, function(err, stats) {
       if(err) {
@@ -266,7 +264,7 @@ function BlastLevel(db, opts) {
           return cb();
         }
         if(!create) return cb()
-        self._rebuild(dbName, cb);
+        self._rebuild(which, cb);
       });
     });
   }
@@ -276,7 +274,6 @@ function BlastLevel(db, opts) {
   // data is optionally a single {key: ..., value: ...} object
   // to build the database from
   this._rebuild = function(which, data, cb) {
-    console.log("WHICH", which)
 
     if(typeof data === 'function') {
       cb = data;
@@ -317,7 +314,7 @@ function BlastLevel(db, opts) {
         // rebuild is now outdated and we can delete it immediately
         // since no other references to this db will exist
         self._deleteDB(dbName); // callback doesn't have to wait for this
-      return cb();
+        return cb();
       }
       
       var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
@@ -348,12 +345,12 @@ function BlastLevel(db, opts) {
   
   this._put = function(key, value, opts, cb) {
     var self = this;
-    
+    console.log('PUUUUUUUUUUT');
     if(!this.opts.rebuildOnChange) {
       var val = JSON.parse(value);
       return this.db.put(key, val, opts, function(err) {
         if(err) return cb(err);
-        if(self.opts.keepUpdateIndex) {
+        if(self.opts.useUpdateDB) {
           self._rebuild('update', {key: key, value: val}, cb);
         } else {
           cb();
@@ -497,7 +494,7 @@ function BlastLevel(db, opts) {
     var self = this;
     
     var seqStream = through.obj(function(data, enc, cb) {
-      console.log(data);
+      console.log("SEQ STREAM:", data);
       if(data.value && self._seqFromVal(data.value)) {
         this.push(self._fastaFormat(data));
       }
@@ -516,8 +513,9 @@ function BlastLevel(db, opts) {
   };
 
   // name of current db
-  this._dbName = function(which) {
-    if(!this._dbs[which].exists) return null;
+  this._dbName = function(which, force) {
+    console.log('------', which, this._dbs[which]);
+    if(!this._dbs[which].exists && !force) return null;
     return this._numberToDBName(which, this._dbs[which].lastRebuild);
   };
 
@@ -642,15 +640,14 @@ function BlastLevel(db, opts) {
   };
 
   // TODO auto-detect if amino acid or nucleotides
-  this.query = function(seq, opts, resultCb, endCb) {
+  this.query = function(seq, opts, cb) {
     var self = this;
     if(typeof opts === 'function') {
-      endCb = resultCb;
-      resultCb = opts;
+      cb = opts;
       opts = {};
     }
     if(!self._hasBlastDBs()) {
-      return endCb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
+      return cb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
     }
 
     opts = xtend({
@@ -673,73 +670,58 @@ function BlastLevel(db, opts) {
 
     if(opts.type === 'blastn') {
       cmd = path.join(this.opts.binPath, "blastn");
-      args = ["-task", "blastn-short", "-db", dbName];
+      args = ["-task", "blastn-short", "-outfmt", "15", "-db", dbName];
     } else {
       // TODO support blastp
       throw new Error("blastp not implemented");
     }
 
-    function end(err) {
-      self._changeQueryCount(qdbs, -1);
-      self._processDeletions(); // callback doesn't have to wait for this
-      endCb(err);
-    }
-    
+    console.log("RUNNING:", cmd, args.join(' '));
 
-    //    console.log("CMD", cmd, args.join(' '));
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
     });
 
-    var stdoutClosed = false;
-    var cmdClosed = false;
+    // TODO what to do about blast.stderr?
+    var output = '';
     var stderr = '';
 
-    blast.stdout.on('data', function(str) {
-      self._debug("["+opts.type+" stdout] " + str);
+    blast.stdout.on('data', function(data) {
+      data = data.toString();
+      self._debug("["+opts.type+" stdout] " + data);
+      
+      output += data;
     });
 
     blast.stderr.on('data', function(data) {
-      stderr += data.toString();
-    });    
-    
+        stderr += data.toString();
+    });
+
+    blast.stdin.on('error', function(err) {
+        // these error messages are rarely useful
+        // and are accompanied by more useful .stderr messages
+        // so just make sure they're handled and throw away the message
+    });
 
     blast.on('close', function(code) {
-      cmdClosed = true;
       if(code) {
         stderr = stderr || "blast command exited with non-zero exit code";
       }
-      if(!stdoutClosed) return;
 
-      if(stderr) return end(new Error(stderr));
-      end();
-    });
-    self._blastnParseStream(blast.stdout, function(dbKey, dbVal, result) {
-      resultCb({
-        key: dbKey,
-        value: dbVal
-      });
-    }, function(err, count) {
-      stdoutClosed = true;
-      if(err) {
-        stderr = err.message + "\n" + stderr;
+      self._changeQueryCount(qdbs, -1);
+      self._processDeletions(); // callback doesn't have to wait for this
+      
+      if(stderr) return cb(new Error(stderr));
+
+      try {
+        output = JSON.parse(output);
+      } catch(e) {
+        return cb(new Error("Error parsing BLAST JSON output"));
       }
-      if(!cmdClosed) return;
-
-      if(stderr) return end(new Error(stderr));
-      end();
+      cb(null, output);
     });
-
-
-    blast.stdin.on('error', function(err) {
-      // these error messages are rarely useful
-      // and are accompanied by more useful .stderr messages
-      // so just make sure they're handled and throw away the message
-    });
-
 
     blast.stdin.end(seq, 'utf8');
-
   };
 
   this.rebuild = function(cb) {
