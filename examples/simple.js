@@ -1,13 +1,19 @@
 #!/usr/bin/env node
 
+var tmp = require('tmp');
 var memdb = require('memdb');
 var blastLevel = require('../index.js');
 
 var db = memdb({valueEncoding: 'json'});
 
+// create temporary dir for blast db storage
+var tmpDir = tmp.dirSync({
+  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
+});
+
 var blastDB = blastLevel(db, {
   seqProp: 'seq', // key in 'mydb' that stores the sequence data
-  path: '/tmp/blastdb', // directory to use for storing BLAST db
+  path: tmpDir.name, // directory to use for storing BLAST db
   rebuild: false, // rebuild the BLAST index when the db is opened
   listen: false, // listen for changes on level db and auto update BLAST db
   useUpdateDB: true, // keep changes since last rebuild in separate BLAST db

@@ -345,7 +345,7 @@ function BlastLevel(db, opts) {
   
   this._put = function(key, value, opts, cb) {
     var self = this;
-    console.log('PUUUUUUUUUUT');
+
     if(!this.opts.rebuildOnChange) {
       var val = JSON.parse(value);
       return this.db.put(key, val, opts, function(err) {
