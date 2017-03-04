@@ -129,6 +129,8 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 
 # ToDo
 
+* Use `makembindex` command to speed up queries.
+* Support different tasks: blastn, blastn-short, megablast, dc-megablast
 * unit tests
 * move to on('change') instead of AbstracLevelDown
 * implement direct mode
@@ -137,6 +139,7 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 * emit 'ready' event when initialization completes
 * implement opts.rebuildOnOpen
 * implement opts.rebuildOnUpdate
+* Make it work with non-JSON value databases?
 
 # Future
 

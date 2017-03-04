@@ -1,26 +1,24 @@
 /*
 
-  Update:
+  ToDo
+ 
+  Test:
 
-  State: Update db is called 'update'.
+  * Multiple puts without full rebuild, both changes and additions, then query
+  * Rebuild after above test
 
-  Increment oneshot counter and generate new dir-unique db name: oneshot1
+  Parse JSON query results and stream leveldb results.
+  Keep track of streamed keys and ensure no dupes.
 
-  Write single sequence to new db with name 'oneshot1'.
+  How do we find latest main database when initializing? If we look at highest number or most recently changed then it could be a partially written database (if app crashed mid-write). Are any of the several files not actually written until the database has finished building?
 
-  Increment update counter and generate new dir-unique db name: update1
+  When initialized the name of the current update dbs should be found by looking for the db called 'update*.nin' that was most recently modified or with the largest file size (looking at file size would protect against opening a partially written db in case of a crash, but won't work for main db). 
 
-  Concat db 'oneshot1' with 'update' to create 'update1'.
-  Ensure that newest updates are first to queries will give newest results first.
+  If a put is a change, how do we ensure that only the new version is reported?
+  Can we just search the databases in the right order and ignore all other than the first hit for that key?
+  That's what we're doing now. Test that it works.
 
-  Change currently active main db name from 'update' to 'update1'
-
-  if active_query_count['update'] is zero
-    Delete old db 'update'.
-
-  After a query on an update db completes, check if the active_query_count for any non-primary databases have dropped to zero and if so delete them. Before each query on an update db increment the active query count for it.
-  
-  When initialized the name of the current update db should be found by looking for the db called 'update*.nin' that was most recently modified or with the largest file size (looking at file size would protect against opening a partially written db in case of a crash).
+  What do we do about rebuild_counter overflows? Look at NOTES
 
 */
 
@@ -81,13 +79,12 @@ function BlastLevel(db, opts) {
   if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
   opts = xtend({    
-    mode: 'blastdb', // or 'direct' or 'streaming' (slow)
+    mode: 'blastdb', // 'blastdb' or 'direct' (slower) or 'streaming' (very slow)
     seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
     path: undefined, // path to use for storing BLAST database (blastdb mode only)
     listen: true, // listen for changes on db and update db automatically
     rebuild: false, // rebuild the BLAST index now
     rebuildOnChange: false, // rebuild the main BLAST db whenever the db is changed
-    useUpdateDB: true, // keep changes since last rebuild in separate BLAST db
     binPath: undefined, // path where BLAST+ binaries are located if not in PATH
     debug: false // turn debug output on or off
   }, opts);
@@ -207,11 +204,22 @@ function BlastLevel(db, opts) {
   
 
   this._onPut = function(key, value, cb) {
-    cb = cb || function(){};    
+    cb = cb || function(){};
+
+    if(this.opts.rebuildOnChange) {
+      this._rebuild('main', cb);
+      return;
+    }
+
+    this._rebuild('update', {key: key, value: val}, cb);
   };
   
   this._onDel = function(key, cb) {
     cb = cb || function(){};
+
+    if(this.opts.rebuildOnChange) {
+      this._rebuild('main', cb);
+    }
   };
 
 
@@ -329,7 +337,7 @@ function BlastLevel(db, opts) {
         console.log("--------------", self._dbs['update'].exists, buildNum, self._dbs['update'].lastRebuild);
         if(self._dbs['update'].exists && (buildNum > self._dbs['update'].lastRebuild)) {
           var lastUpdateName = self._numberToDBName('update', self._dbs['update'].lastRebuild);
-          self._attemptDelete(lastUpdateName)
+          self._attemptDelete(lastUpdateName);
           self._dbs['update'].exists = false;
         } 
       }
@@ -343,47 +351,6 @@ function BlastLevel(db, opts) {
     return val[this.opts.seqProp];
   }
   
-  this._put = function(key, value, opts, cb) {
-    var self = this;
-
-    if(!this.opts.rebuildOnChange) {
-      var val = JSON.parse(value);
-      return this.db.put(key, val, opts, function(err) {
-        if(err) return cb(err);
-        if(self.opts.useUpdateDB) {
-          self._rebuild('update', {key: key, value: val}, cb);
-        } else {
-          cb();
-        }
-      });
-    }
-    
-    var self = this;
-    this.db.put(key, JSON.parse(value), opts, function(err) {
-      self._rebuild('main', cb);
-    });
-    
-  };
-  
-
-  this._del = function(key, opts, cb) {
-    
-    // TODO
-    throw new Error("not implemented");
-    this.db.del(key, opts, cb);
-  };
-
-  this._batch = function(array, opts, cb) {
-    
-    // TODO
-    throw new Error("not implemented");
-    return this.db.batch(key, opts, cb);
-  };
-
-  this.get = function(key, opts, cb) {
-    // TODO
-    throw new Error("not implemented");
-  };
 
   this._debug = function(msg) {
     if(!this.opts.debug) return;
@@ -433,13 +400,28 @@ function BlastLevel(db, opts) {
 
     var seqStream = this._seqStream();
 
-    if(opts.stream) {
-      opts.stream.pipe(seqStream);
-    } else {
-      this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
-    }
+    // creating blast db from one or more existing blast dbs 
+    // (concatenate databases)
+    if(opts.fromBlastDBs) {
 
-    seqStream.pipe(makedb.stdin);
+      var dbPaths = opts.fromBlastDBs.map(function(dbName) {
+        return path.join(self.opts.path, dbName);
+      });
+
+      args += ['-in', dbPaths.join(' '), '-input_type', 'blastdb'];
+
+    } else { // creating from a stream
+
+      if(opts.stream) { // stream was supplied as opts argument
+        opts.stream.pipe(seqStream);
+
+      } else { // no stream specified so make a stream from entire database
+
+        // TODO assuming JSON values (what if it's a string or buffer?)
+        this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
+      }
+      seqStream.pipe(makedb.stdin);
+    }
 
     var stdoutClosed = false;
     var stderrClosed = false;
@@ -456,6 +438,7 @@ function BlastLevel(db, opts) {
     });
 
     // TODO act on makedb.close instead!
+    // (then we should be able to know that stderr and stdout have already ended
     makedb.stdout.on('close', function() {
       stdoutClosed = true;
       if(stderrClosed) {
@@ -493,8 +476,8 @@ function BlastLevel(db, opts) {
   this._seqStream = function() {
     var self = this;
     
+    // TODO assuming object mode stream (what if it's a string or buffer?)
     var seqStream = through.obj(function(data, enc, cb) {
-      console.log("SEQ STREAM:", data);
       if(data.value && self._seqFromVal(data.value)) {
         this.push(self._fastaFormat(data));
       }
@@ -514,7 +497,6 @@ function BlastLevel(db, opts) {
 
   // name of current db
   this._dbName = function(which, force) {
-    console.log('------', which, this._dbs[which]);
     if(!this._dbs[which].exists && !force) return null;
     return this._numberToDBName(which, this._dbs[which].lastRebuild);
   };
@@ -595,32 +577,38 @@ function BlastLevel(db, opts) {
 
   this._rebuildUpdateDB = function(dbName, data, cb) {
     var self = this;
+   
+    // build db from single sequence
+    // data should have data.key and data.value
     
-    if(!this._dbs['update'].exists) {
-      // build update db from single sequence
-      // data should have data.key and data.value
+    var s = this._singleObjectStream(data);
+
+    var singleSeqDBName = dbName;
       
-      var s = this._singleObjectStream(data);
-      
-      this._createBlastDB(dbName, {stream: s}, function(err) {
-        if(err) return cb(err);
-        
+    if(this._dbs['update'].exists) {
+      singleSeqDBName += '_tmp';
+    }
+
+    this._createBlastDB(singleSeqDBName, {stream: s}, function(err) {
+      if(err) return cb(err);
+
+      // if there wasn't an existing update database, we're done here
+      if(!self._dbs['update'].exists) {
         self._dbs['update'].exists = true;
         cb();
-      });
-      
-      
-    } else {
-      throw new Error("TODO not implemented");
-      /*
-        Should use BLAST concat:
-        
-        makeblastdb -dbtype nucl -title 'newdb' -in '/path/to/existing/db /tmp/to_append' -input_type blastdb -out /path/to/concatenated/db
-        
-        and blastdb_aliastool (or can you pass multiple dbs to blastn?)
-        
-      */
-    }
+        return;
+      }
+
+      // there was an existing update database
+      // so create a new update database by concatenating the old 
+      // update database with the new single sequence database
+      self._createBlastDB(dbName, {
+        fromBlastDBs: [
+          self._dbName('update'),
+          singleSeqDBname
+        ]
+      } cb);
+    });
   };
 
   // get db name(s) to use for queries
