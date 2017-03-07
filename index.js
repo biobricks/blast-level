@@ -102,12 +102,17 @@ function BlastLevel(db, opts) {
     throw new Error("First argument must be a level instance");
   }
 
+/*
   this._dbOpts = {
     keyEncoding: 'utf8', 
     valueEncoding: 'json'
   };
-
+*/
   this.db = db; // leveldb instance
+
+  this._ready = false; // is blast-level fully initialized
+  this._changeBuffer = []; // buffer changes here until this._ready is true
+  this._processingBuffer = false; // is the buffer currently being processed?
 
   this._ignoreList = {};
   this._ignoreCount = 0;
@@ -125,18 +130,6 @@ function BlastLevel(db, opts) {
     }
   };
 
-  if(this.opts.listen) {
-    this.c = changes(this.db);
-    this.c.on('data', function(change) {
-      if(this._shouldIgnore(change)) return;
-      if(change.type === 'put') {
-        this._onPut(change.key, change.value);
-      } else { // del
-        this._onDel(change.key);
-      }
-    }.bind(this));
-  }    
-
   // ----------- init
 
 
@@ -145,15 +138,69 @@ function BlastLevel(db, opts) {
 
     function cb(err) {
       if(err) return self.emit('error', err);
+      self._ready = true;
       self.emit('ready');
+      console.log("ready!");
+      self._processBuffer();
     }
   
-    self._checkDB('main', this.opts.rebuild, function(err) {
+    if(this.opts.listen) {
+      this.c = changes(this.db);
+      this.c.on('data', this._onChange.bind(this));
+    }    
+
+    this._checkDB('main', this.opts.rebuild, function(err) {
       if(err) return cb(err);
       self._checkDB('update', false, cb);
     });
   };
 
+  this._buffer = function(change) {
+    console.log("buffering:", change);
+    this._changeBuffer.push(change);
+  };
+
+  this._processBuffer = function() {
+    var self = this;
+
+    // if we're already processing then we don't want to trigger again
+    if(this._processingBuffer) return;
+
+    this._processingBuffer = true;
+    console.log("processing change buffer of length:", this._changeBuffer.length);
+
+    var change;
+    async.whilst(
+      function() {
+        return !!(self._changeBuffer.length)
+
+      }, function(cb) {
+        change = self._changeBuffer[0];
+        self._changeBuffer = self._changeBuffer.slice(1);
+        
+        self._processChange(change, cb);
+        
+      }, function(err) {
+        if(err) console.error("Processing buffer failed:", err);
+        self._processingBuffer = false;        
+      });
+
+  };
+
+  this._onChange = function(change) {
+    if(this._shouldIgnore(change)) return;
+    this._buffer(change);
+    this._processBuffer();
+
+  };
+
+  this._processChange = function(change, cb) {
+    if(change.type === 'put') {
+      this._onPut(change.key, change.value, cb);
+    } else { // del
+      this._onDel(change.key, cb);
+    }
+  };
 
   // ----------- methods below
 
@@ -211,7 +258,7 @@ function BlastLevel(db, opts) {
       return;
     }
 
-    this._rebuild('update', {key: key, value: val}, cb);
+    this._rebuild('update', {key: key, value: value}, cb);
   };
   
   this._onDel = function(key, cb) {
@@ -391,26 +438,33 @@ function BlastLevel(db, opts) {
     }
     
     var dbPath = path.join(self.opts.path, name);
-    console.log("CREATING", dbPath);
+    console.log("");
+    console.log("---------------------------------------------");
+    console.log("creating blast db:", dbPath);
 
     var cmd = path.join(this.opts.binPath, "makeblastdb");
     var args = ["-dbtype", "nucl", "-title", "'blastlevel'", "-out", dbPath];
-    
-    var makedb = spawn(cmd, args);
-
-    var seqStream = this._seqStream();
 
     // creating blast db from one or more existing blast dbs 
     // (concatenate databases)
     if(opts.fromBlastDBs) {
-
+      console.log("CONCAT");
       var dbPaths = opts.fromBlastDBs.map(function(dbName) {
         return path.join(self.opts.path, dbName);
       });
 
-      args += ['-in', dbPaths.join(' '), '-input_type', 'blastdb'];
+      args = args.concat(['-in', dbPaths.join(' '), '-input_type', 'blastdb']);
+
+      console.log("running:", cmd, args.join(' '));
+
+      var makedb = spawn(cmd, args, {shell: true});
 
     } else { // creating from a stream
+
+      console.log("running:", cmd, args.join(' '));
+
+      var seqStream = this._seqStream();
+      var makedb = spawn(cmd, args);
 
       if(opts.stream) { // stream was supplied as opts argument
         opts.stream.pipe(seqStream);
@@ -423,12 +477,11 @@ function BlastLevel(db, opts) {
       seqStream.pipe(makedb.stdin);
     }
 
-    var stdoutClosed = false;
-    var stderrClosed = false;
     var stderr = '';
 
     var addedCount = 0;
     var str, m;
+
     makedb.stdout.on('data', function(data) {
       str = data.toString();
       self._debug("[makeblastdb] " + str);
@@ -437,16 +490,10 @@ function BlastLevel(db, opts) {
       addedCount = parseInt(m[1]);
     });
 
-    // TODO act on makedb.close instead!
-    // (then we should be able to know that stderr and stdout have already ended
-    makedb.stdout.on('close', function() {
-      stdoutClosed = true;
-      if(stderrClosed) {
-        stderr = stderr ? new Error(stderr) : undefined;
-        cb(stderr, addedCount)
-      }
+    makedb.on('close', function() {
+      stderr = stderr ? new Error(stderr) : undefined;
+      cb(stderr, addedCount)
     });
-
 
     makedb.stderr.on('data', function(data) {
       stderr += data.toString();
@@ -456,11 +503,6 @@ function BlastLevel(db, opts) {
       // Ignore "no sequences added" errors
       m = stderr.match(/No sequences added/i);
       if(m) stderr = '';
-      stderrClosed = true;
-      if(stdoutClosed) {
-        stderr = stderr ? new Error(stderr) : undefined;
-        cb(stderr, addedCount)
-      }
     });
   };
 
@@ -586,6 +628,7 @@ function BlastLevel(db, opts) {
     var singleSeqDBName = dbName;
       
     if(this._dbs['update'].exists) {
+      console.log(" !!!!!!!! udate db exists");
       singleSeqDBName += '_tmp';
     }
 
@@ -594,6 +637,7 @@ function BlastLevel(db, opts) {
 
       // if there wasn't an existing update database, we're done here
       if(!self._dbs['update'].exists) {
+        console.log(" !!!!!!!! update db became real after:", dbName);
         self._dbs['update'].exists = true;
         cb();
         return;
@@ -605,9 +649,9 @@ function BlastLevel(db, opts) {
       self._createBlastDB(dbName, {
         fromBlastDBs: [
           self._dbName('update'),
-          singleSeqDBname
+          singleSeqDBName
         ]
-      } cb);
+      }, cb);
     });
   };
 
