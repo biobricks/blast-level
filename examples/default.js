@@ -19,7 +19,7 @@ var blastDB = blastLevel(db, {
   seqProp: 'seq', // key in 'mydb' that stores the sequence data
   path: tmpDir.name, // directory to use for storing BLAST db
   rebuild: true, // rebuild the BLAST index when the db is opened
-  rebuildOnChange: true,
+  rebuildOnChange: false,
   listen: true, // listen for changes on level db and auto update BLAST db
   //    debug: true,
   binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"

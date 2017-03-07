@@ -190,17 +190,15 @@ function BlastLevel(db, opts) {
 
     this._processingBuffer = true;
 
-    var change;
+    var changes;
     async.whilst(
       function() {
         return !!(self._changeBuffer.length)
-
       }, function(cb) {
-        change = self._changeBuffer[0];
-        self._changeBuffer = self._changeBuffer.slice(1);
+        changes = self._changeBuffer;
+        self._changeBuffer = [];
         
-        self._processChange(change, cb);
-        
+        self._processPuts(changes, cb);
       }, function(err) {
         if(err) console.error("Processing buffer failed:", err);
         self._processingBuffer = false;
@@ -214,19 +212,26 @@ function BlastLevel(db, opts) {
     if(this.opts.rebuildOnChange) {
       this._changed = true;
     } else {
-      this._buffer(change);
+      if(change.type === 'put') {
+        this._buffer(change);
+      }
     }
 
     if(!this._ready) return;
     this._processBuffer();
   };
 
-  this._processChange = function(change, cb) {
-    if(change.type === 'put') {
-      this._onPut(change.key, change.value, cb);
-    } else { // del
-      this._onDel(change.key, cb);
+  // only called if opts.rebuildOnChange is false
+  this._processPuts = function(changes, cb) {
+    cb = cb || function(){};
+    if(!(changes instanceof Array)) changes = [changes];
+
+    if(!this._dbs.main.exists) {
+      this._rebuild('main', cb);
+      return;
     }
+
+    this._rebuild('update', changes, cb);
   };
 
   // ----------- methods below
@@ -278,14 +283,7 @@ function BlastLevel(db, opts) {
   
 
   this._onPut = function(key, value, cb) {
-    cb = cb || function(){};
 
-    if(this.opts.rebuildOnChange || !this._dbs.main.exists) {
-      this._rebuild('main', cb);
-      return;
-    }
-
-    this._rebuild('update', {key: key, value: value}, cb);
   };
   
   this._onDel = function(key, cb) {
@@ -632,7 +630,7 @@ function BlastLevel(db, opts) {
 
 
 
-  // this function ignore the data argument for now
+  // this function ignores the data argument
   this._rebuildMainDB = function(dbName, data, cb) {
     var self = this;
     
@@ -648,13 +646,29 @@ function BlastLevel(db, opts) {
   };
 
   // create a stream that emits the single object: data
+  // stripping all but .key and .value properties
   this._singleObjectStream = function(data) {
     var done = false;
     // create a stream that emits a single object and closes
     return from.obj(function(size, next) {
       if(done) return next(null, null);
       done = true;    
-      next(null, data);
+      next(null, {key: data.key, value: data.value});
+    });
+  };
+
+  // create a stream that emits the objects in the array `items`
+  // stripping all but .key and .value properties of each object
+  this._arrayToStream = function(items) {
+    var item;
+    return from.obj(function(size, next) {
+      if(!items.length) return next(null, null);
+      item = items[0];
+      items = items.slice(1);
+
+      this.push({key: item.key, data: item.value})
+
+      next();
     });
   };
 
@@ -664,17 +678,19 @@ function BlastLevel(db, opts) {
     // build db from single sequence
     // data should have data.key and data.value
     
-    var s = this._singleObjectStream(data);
+    var s = this._arrayToStream(data);
 
-    var singleSeqDBName = dbName;
+    var newSeqsDBName = dbName;
       
     if(this._dbs.update.exists) {
       console.log(" !!!!!!!! udate db exists");
-      singleSeqDBName += '_tmp';
+      newSeqsDBName += '_tmp';
     }
 
-    this._createBlastDB(singleSeqDBName, {stream: s}, function(err) {
+    this._createBlastDB(newSeqsDBName, {stream: s}, function(err, count) {
       if(err) return cb(err);
+
+      console.log("$$$$$$$$$$$", dbName, "created with", count);
 
       // if there wasn't an existing update database, we're done here
       if(!self._dbs.update.exists) {
@@ -690,9 +706,15 @@ function BlastLevel(db, opts) {
       self._createBlastDB(dbName, {
         fromBlastDBs: [
           self._dbName('update'),
-          singleSeqDBName
+          newSeqsDBName
         ]
-      }, cb);
+      }, function(err, count) {
+        if(err) return cb(err);
+
+        console.log("$$$$$$$$$$$", dbName, "created with", count);
+
+        cb();
+      });
     });
   };
 
