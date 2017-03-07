@@ -111,6 +111,7 @@ function BlastLevel(db, opts) {
   this.db = db; // leveldb instance
 
   this._ready = false; // is blast-level fully initialized
+  this._changed = false; // did db change since last processing? only used when rebuildOnChange:true
   this._changeBuffer = []; // buffer changes here until this._ready is true
   this._processingBuffer = false; // is the buffer currently being processed?
 
@@ -151,12 +152,16 @@ function BlastLevel(db, opts) {
 
     this._checkDB('main', this.opts.rebuild, function(err) {
       if(err) return cb(err);
+
+      // no need to check update db if main doesn't exist
+      if(!self._dbs.main.exists) return cb();
+
       self._checkDB('update', false, cb);
     });
   };
 
   this._buffer = function(change) {
-    console.log("buffering:", change);
+    console.log("+++++++ buffering:", change);
     this._changeBuffer.push(change);
   };
 
@@ -166,8 +171,24 @@ function BlastLevel(db, opts) {
     // if we're already processing then we don't want to trigger again
     if(this._processingBuffer) return;
 
+    // if we're doing a complete rebuild on every change
+    // then we're not actually using the buffer, just the this._changed flag
+    if(this.opts.rebuildOnChange) {
+      if(!this._changed) return;
+      this._processingBuffer = true;
+      this._changed = false;
+      this.rebuild(function(err) {
+        self._processingBuffer = false;
+
+        // if there was a change during the rebuild, process again
+        if(self._changed) self._processBuffer();
+      });
+      return;
+    }
+
+    console.log("####### processing change buffer of length:", this._changeBuffer.length);
+
     this._processingBuffer = true;
-    console.log("processing change buffer of length:", this._changeBuffer.length);
 
     var change;
     async.whilst(
@@ -182,16 +203,22 @@ function BlastLevel(db, opts) {
         
       }, function(err) {
         if(err) console.error("Processing buffer failed:", err);
-        self._processingBuffer = false;        
+        self._processingBuffer = false;
       });
 
   };
 
   this._onChange = function(change) {
     if(this._shouldIgnore(change)) return;
-    this._buffer(change);
-    this._processBuffer();
 
+    if(this.opts.rebuildOnChange) {
+      this._changed = true;
+    } else {
+      this._buffer(change);
+    }
+
+    if(!this._ready) return;
+    this._processBuffer();
   };
 
   this._processChange = function(change, cb) {
@@ -294,12 +321,17 @@ function BlastLevel(db, opts) {
 
     var dbName = this._dbName(which, true);
 
+    console.log("@@@ checking if db exists:", dbName)
+
     fs.stat(self.opts.path, function(err, stats) {
       if(err) {
         if(err.code === 'ENOENT') {
+          console.log("@@@ it didn't even have a parent dir:", dbName);
+
           fs.mkdir(self.opts.path, function(err) {
             if(err) return cb(err);
             if(!create) return cb()
+            console.log("@@@ running _rebuild for:", which);
             self._rebuild(which, cb);
           });
           return;
@@ -315,10 +347,12 @@ function BlastLevel(db, opts) {
       self._doesBlastDBExist(dbName, function(err, exists) {
         if(err) return cb(err);
         if(exists) {
+          console.log("@@@ it exists!", dbName);
           self._dbs[which].exists = true;
           return cb();
         }
         if(!create) return cb()
+        console.log("@@@ running _rebuild for:", which);
         self._rebuild(which, cb);
       });
     });
@@ -342,6 +376,8 @@ function BlastLevel(db, opts) {
     
     // generate a directory-unique db name
     var dbName = this._numberToDBName(which, buildNum);
+    console.log("@@@ _rebuild db:", dbName);
+    console.log("@@@ _buffer:", this._changeBuffer.length);
     
     // pick the function to actually call to rebuild
     // based on whether we're rebuilding the 'main' or 'update' db
@@ -355,6 +391,8 @@ function BlastLevel(db, opts) {
     f(dbName, data, function(err) {
       if(err) return cb(err);
       
+      console.log("@@@ finalizing _rebuild:", dbName)
+
       // if this build's number is greater than the number of the
       // most recently completed rebuild then we know our rebuild
       // is newer than the previous rebuild so we can safely
@@ -457,7 +495,7 @@ function BlastLevel(db, opts) {
 
       console.log("running:", cmd, args.join(' '));
 
-      var makedb = spawn(cmd, args, {shell: true});
+      var makedb = spawn(cmd, args);
 
     } else { // creating from a stream
 
@@ -521,6 +559,7 @@ function BlastLevel(db, opts) {
     // TODO assuming object mode stream (what if it's a string or buffer?)
     var seqStream = through.obj(function(data, enc, cb) {
       if(data.value && self._seqFromVal(data.value)) {
+        console.log("|||||||||||| Added:", self._seqFromVal(data.value));
         this.push(self._fastaFormat(data));
       }
       cb();
@@ -599,7 +638,9 @@ function BlastLevel(db, opts) {
     
     this._createBlastDB(dbName, function(err, count) {
       if(err) return cb(err);
-      
+
+      console.log("$$$$$$$$$$$", dbName, "created with", count);
+
       self._dbs.main.exists = (count == 0) ? false : true;
       
       cb();
