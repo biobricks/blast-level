@@ -226,6 +226,7 @@ function BlastLevel(db, opts) {
     cb = cb || function(){};
     if(!(changes instanceof Array)) changes = [changes];
 
+
     if(!this._dbs.main.exists) {
       this._rebuild('main', cb);
       return;
@@ -660,15 +661,13 @@ function BlastLevel(db, opts) {
   // create a stream that emits the objects in the array `items`
   // stripping all but .key and .value properties of each object
   this._arrayToStream = function(items) {
+
     var item;
     return from.obj(function(size, next) {
       if(!items.length) return next(null, null);
       item = items[0];
       items = items.slice(1);
-
-      this.push({key: item.key, data: item.value})
-
-      next();
+      next(null, {key: item.key, value: item.value})
     });
   };
 
