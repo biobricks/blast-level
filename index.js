@@ -1,14 +1,29 @@
 /*
 
+  !!!!!!!!!!!!!!!!
+  * What if a sequence is updated, the new sequence written to the update db and then updated again. A BLAST query that only finds the old sequence will give a wrong result!
+  ** Keep a hash of the sequence in the FASTA header and check against hash of sequence in leveldb before reporting results
+  ** When we implement support for large sequences in files then we'll simply save the hash for each file in a separate file so we don't to re-compute when we query
+  ** We should also do this for in-db sequences actually, but if there is no seqHash key set for blast-level then it will simply fall back to re-computing
+
+  !!!!!!!!!!!!!!!!
+
   ToDo
  
-  Test:
+  * Startup reload of latest DBs and cleanup of everything else
+  ** See ._saveBlastDBName and ._loadBlastDBName
+  * Test that query count and delete of old DBs works
+  * Parse JSON query results and stream leveldb results.
+  * Keep track of streamed keys and ensure no dupes.
+  * Direct .put, .del and .batch (both in listen and no listen modes)
+  * Implement 'direct' mode
 
+  Test:
+  
   * Multiple puts without full rebuild, both changes and additions, then query
   * Rebuild after above test
+  * Test opts.rebuildOnChange == true
 
-  Parse JSON query results and stream leveldb results.
-  Keep track of streamed keys and ensure no dupes.
 
   How do we find latest main database when initializing? If we look at highest number or most recently changed then it could be a partially written database (if app crashed mid-write). Are any of the several files not actually written until the database has finished building?
 
@@ -732,6 +747,43 @@ function BlastLevel(db, opts) {
     this._toDelete.push(dbName);
     this._processDeletions();
   };
+
+
+  // write name of latest blast db name to disk
+  // so the correct db can be re-used on next time the lib/app is loaded
+  this._saveBlastDBName = function(which, cb) {
+    var self = this;
+    var stateFilePath = path.join(self.opts.path, which+'.state');
+
+    fs.writeFile(stateFilePath, this._dbName(which), {
+      encoding: 'utf8'
+    }, cb);
+  },
+
+  // read latest existing blast database name from disk
+  // either 'main' or 'update' db
+  this._loadBlastDBName = function(which, cb) {
+    var self = this;
+    var stateFilePath = path.join(self.opts.path, which+'.state');
+    fs.readFile(stateFilePath, {
+      encoding: 'utf8'
+    }, function(err, dbName) {
+      if(err) {
+        if(err.code == 'ENOENT') return cb();
+        return cb(err);
+      }
+      dbName = dbName.trim();
+
+      self._doesBlastDBExist(dbName, function(err, doesItExist) {
+        if(err) return cb(err);
+        if(!doesItExist) return cb();
+
+        cb(null, dbName);
+      });
+    })
+  };
+  
+  // -------------- public methods below
 
   // TODO auto-detect if amino acid or nucleotides
   this.query = function(seq, opts, cb) {
