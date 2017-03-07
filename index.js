@@ -120,11 +120,11 @@ function BlastLevel(db, opts) {
   // BLAST databases
   this._dbs = {
     rebuildCount: 0, // number of rebuilds completed
-    'main': {
+    main: {
       lastRebuild: 0, // number of last completed rebuild
       exists: false
     },
-    'update': {
+    update: {
       lastRebuild: 0,
       exists: false
     }
@@ -253,7 +253,7 @@ function BlastLevel(db, opts) {
   this._onPut = function(key, value, cb) {
     cb = cb || function(){};
 
-    if(this.opts.rebuildOnChange) {
+    if(this.opts.rebuildOnChange || !this._dbs.main.exists) {
       this._rebuild('main', cb);
       return;
     }
@@ -381,11 +381,11 @@ function BlastLevel(db, opts) {
       
       // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
       if(which === 'main') {
-        console.log("--------------", self._dbs['update'].exists, buildNum, self._dbs['update'].lastRebuild);
-        if(self._dbs['update'].exists && (buildNum > self._dbs['update'].lastRebuild)) {
-          var lastUpdateName = self._numberToDBName('update', self._dbs['update'].lastRebuild);
+        console.log("--------------", self._dbs.update.exists, buildNum, self._dbs.update.lastRebuild);
+        if(self._dbs.update.exists && (buildNum > self._db.update.lastRebuild)) {
+          var lastUpdateName = self._numberToDBName('update', self._dbs.update.lastRebuild);
           self._attemptDelete(lastUpdateName);
-          self._dbs['update'].exists = false;
+          self._dbs.update.exists = false;
         } 
       }
       cb();
@@ -531,7 +531,7 @@ function BlastLevel(db, opts) {
 
   // do any blast databases currently exist?
   this._hasBlastDBs = function() {
-    if(this._dbs['main'].exists || this._dbs['update'].exists) {
+    if(this._dbs.main.exists || this._dbs.update.exists) {
       return true;
     }
     return false;
@@ -600,7 +600,7 @@ function BlastLevel(db, opts) {
     this._createBlastDB(dbName, function(err, count) {
       if(err) return cb(err);
       
-      self._dbs['main'].exists = (count == 0) ? false : true;
+      self._dbs.main.exists = (count == 0) ? false : true;
       
       cb();
     });
@@ -627,7 +627,7 @@ function BlastLevel(db, opts) {
 
     var singleSeqDBName = dbName;
       
-    if(this._dbs['update'].exists) {
+    if(this._dbs.update.exists) {
       console.log(" !!!!!!!! udate db exists");
       singleSeqDBName += '_tmp';
     }
@@ -636,9 +636,9 @@ function BlastLevel(db, opts) {
       if(err) return cb(err);
 
       // if there wasn't an existing update database, we're done here
-      if(!self._dbs['update'].exists) {
+      if(!self._dbs.update.exists) {
         console.log(" !!!!!!!! update db became real after:", dbName);
-        self._dbs['update'].exists = true;
+        self._dbs.update.exists = true;
         cb();
         return;
       }
