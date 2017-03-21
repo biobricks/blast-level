@@ -57,6 +57,7 @@ var async = require('async');
 var changes = require('level-changes');
 var rimraf = require('rimraf');
 var EventEmitter = require('events').EventEmitter;
+var PassThrough = require('readable-stream').PassThrough;
 
 // hash an operation
 function hashOp(type, key, value) {
@@ -517,6 +518,35 @@ function BlastLevel(db, opts) {
   };
 
 
+  this._levelRowFromBlastHit = function(hit, cb) {
+    if(!hit || !hit.description || !hit.description.length || !hit.description[0].title) {
+      return cb();
+    }
+    var o;
+    try {
+      o = JSON.parse(hit.description[0].title);
+      throw new Error("FOO"); // TODO can we fix this with pump
+    } catch(e) {
+      return cb(e);
+    }
+
+    this.db.get(o.key, function(err, value) {
+      if(err) return cb(err);
+
+      o = {
+        key: o.key,
+        value: value
+      };
+
+      if(hit.hsps && hit.hsps.length) {
+        o.hsps = hit.hsps[0];
+      }
+
+      cb(null, o);
+    });
+
+  };
+
   // Builds a blast db from all sequences in the leveldb instance
   // or from a specified readable stream
   // callback gives back args:
@@ -851,6 +881,7 @@ function BlastLevel(db, opts) {
 
     opts = xtend({
       type: undefined, // or 'blastn' or 'blastp'. auto-detects if undefined
+      output: 'stream' // 'stream', 'array', 'blast' or 'blastraw'
     }, opts || {});
 
     if(!opts.type) {
@@ -876,6 +907,25 @@ function BlastLevel(db, opts) {
     }
 
 //    console.log("RUNNING:", cmd, args.join(' '));
+    var outStream;
+    if(opts.output === 'stream') {
+      outStream = new PassThrough({objectMode: true});
+
+      // create a callback that emits an error or ends the stream
+      cb = function(err, results) {
+        if(err) {
+          from.obj(function(size, next) {
+            next(err);
+          }).pipe(outStream);
+          return;
+        }
+        if(!results || !results.length) {
+          from.obj(function(size, next) {
+            next(null, null); // end stream
+          }).pipe(outStream);
+        }
+      };
+    }
 
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
@@ -917,10 +967,63 @@ function BlastLevel(db, opts) {
       } catch(e) {
         return cb(new Error("Error parsing BLAST JSON output"));
       }
-      cb(null, output);
+
+      if(!output) {
+        return cb(null, []);
+      }
+
+      if(opts.output === 'blastraw') {
+        return cb(null, output);
+      }
+
+      if(!output.BlastOutput2 || !output.BlastOutput2.length || !output.BlastOutput2[0] || !output.BlastOutput2[0].report || !output.BlastOutput2[0].report.results || !output.BlastOutput2[0].report.results.search || !output.BlastOutput2[0].report.results.search.hits || !output.BlastOutput2[0].report.results.search.hits.length) {
+        return cb(null, []);
+      }
+
+      if(opts.output === 'blast') {
+        return cb(null, output.BlastOutput2[0].report.results.search.hits);
+      }
+
+      output = output.BlastOutput2[0].report.results.search.hits;
+
+      function nextResult(size, next) {
+        if(i > output.length - 1) return next(null, null);
+        
+        self._levelRowFromBlastHit(output[i++], function(err, row) {
+          if(err) return cb(err);
+          if(!row) {
+            process.nextTick(function() {
+              nextResult(size, next);
+            });
+          }
+          
+          next(null, row);
+        })
+      }
+
+      var i = 0;
+      if(outStream) {
+        from.obj(nextResult).pipe(outStream);
+        return;
+      }      
+
+      // 'array' output
+
+      var results = [];
+      async.eachSeries(output, function(result, next) {
+        
+      }, function(err) {
+        if(err) return cb(err);
+
+        cb(null, results);
+      });
     });
 
     blast.stdin.end(seq, 'utf8');
+
+    if(outStream) {
+      return outStream;
+    }
   };
 
   this.rebuild = function(cb) {
