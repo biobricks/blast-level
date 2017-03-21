@@ -10,15 +10,16 @@ var db = memdb({valueEncoding: 'json'});
 
 // create temporary dir for blast db storage
 var tmpDir = tmp.dirSync({
-  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
-//  keep: true // don't delete on exit
+//  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
+  keep: true // don't delete on exit
 });
 
 
 var blastDB = blastLevel(db, {
   seqProp: 'seq', // key in 'mydb' that stores the sequence data
-  path: tmpDir.name, // directory to use for storing BLAST db
-  rebuild: true, // rebuild the BLAST index when the db is opened
+//  path: tmpDir.name, // directory to use for storing BLAST db
+  path: '/tmp/foo',
+//  rebuild: true, // rebuild the BLAST index when the db is opened
   rebuildOnChange: false,
   listen: true, // listen for changes on level db and auto update BLAST db
   //    debug: true,
@@ -56,16 +57,28 @@ db.put('foo-'+r(), {
     if(err) fail(err);
     
     console.log("added bar");    
-    
-    db.put('baz-'+r(), {
-      seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA"
-    }, function(err) {
-      if(err) fail(err);
+
+    setTimeout(function() {
       
-      console.log("added baz");
+      db.put('baz-'+r(), {
+        seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA"
+      }, function(err) {
+        if(err) fail(err);
+        
+        console.log("added baz");
+        
+        db.put('fourth-'+r(), {
+          seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA"
+        }, function(err) {
+          if(err) fail(err);
+          
+          console.log("added fourth");
+          
+          
+        });
+      });
 
-
-    });
+    }, 500);
   });
 
 

@@ -78,7 +78,9 @@ In the `blastdb` and `direct` modes the output will be in the normal `blastn` fo
 
 ## blastdb
 
-`blastdb` mode keeps a native BLAST database on disk. This is the fastest option. In this mode, assuming `opts.rebuildOnChange` is false, two BLAST databases are kept. A primary BLAST database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling `.rebuild()` which could be done by a cron script, and it can be triggered automatically whenever the blastlevel database is opened by setting `rebuildOnOpen: true` (default false). If rebuildOnChange is set to true (default false) then a single BLAST db is kept containing all sequence data and the entire BLAST database is rebuilt every time sequence data is changed.
+`blastdb` mode keeps a native BLAST database on disk. This is the fastest option. In this mode all existing data is kept in a primary BLAST database called `main` and all changes since `blast-level` was last rebuilt is kept in a separate `update` database. This is done because BLAST databases cannot be modified, so the entire database has to be re-written every time a change occurs. Instead of re-writing the entire database on every `.put` or `.del` only the added or changed databases 
+
+ A primary BLAST database is created from all sequence data in leveldb when the db is first opened and another database is kept that contains all changed sequences since the primary database was rebuilt. The primary database can be manually rebuilt by calling `.rebuild()` which should be done periodically, and it can be triggered automatically whenever the blastlevel database is opened by setting `rebuildOnOpen: true` (default false). If rebuildOnChange is set to true (default false) then a single BLAST db is kept containing all sequence data and the entire BLAST database is rebuilt every time sequence data is changed.
 
 When operating in blastdb mode with rebuildOnChange:false (the default) when a sequence is deleted in leveldb the sequence is not deleted in the blast index. If a query is run that results in a hit on a deleted sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last index rebuild no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using another mode.
 
@@ -129,17 +131,23 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 
 # ToDo
 
-* Use `makembindex` command to speed up queries.
-* Support different tasks: blastn, blastn-short, megablast, dc-megablast
-* unit tests
-* move to on('change') instead of AbstracLevelDown
-* implement direct mode
-* implement .batch
-* allow seqProp to be a function or 'foo.bar.baz'
-* emit 'ready' event when initialization completes
-* implement opts.rebuildOnOpen
-* implement opts.rebuildOnUpdate
-* Make it work with non-JSON value databases?
+## Next version
+
+* support multiple sequences, multiple filenames or a stream as seqProp value
+** See _arrayToStream and combine it with _seqStream
+* integrate with streaming-sequence-extractor for FASTA, GenBank and SBOL support
+* switch away from level-changes so we can catch .on('batch')
+* add useful debug output when opts.debug is used. maybe two levels of debug?
+* implement queries properly, with auto-ref to leveldb key/values 
+* support different tasks: blastn, blastn-short, megablast, dc-megablast
+* write unit tests
+
+## Future
+
+* implement direct mode (don't keep any on-filesystem blastdb)
+* write more unit tests
+* use `makembindex` command to speed up queries?
+* make it work with non-JSON value databases? 
 
 # Future
 

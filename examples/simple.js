@@ -8,7 +8,7 @@ var db = memdb({valueEncoding: 'json'});
 
 // create temporary dir for blast db storage
 var tmpDir = tmp.dirSync({
-  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
+//  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
 });
 
 var blastDB = blastLevel(db, {
