@@ -138,13 +138,13 @@ Since none of the BLAST+ command line tools allow modifying a BLAST database (ap
 * integrate with streaming-sequence-extractor for FASTA, GenBank and SBOL support
 * switch away from level-changes so we can catch .on('batch')
 * add useful debug output when opts.debug is used. maybe two levels of debug?
-* implement queries properly, with auto-ref to leveldb key/values 
-* support different tasks: blastn, blastn-short, megablast, dc-megablast
+* add support for blastx, tblastx and tblastn
 * write unit tests
 
 ## Future
 
 * implement direct mode (don't keep any on-filesystem blastdb)
+* support megablast and maybe blastpgp
 * write more unit tests
 * use `makembindex` command to speed up queries?
 * make it work with non-JSON value databases? 
@@ -166,7 +166,7 @@ A new BLAST database could then be generated from scratch e.g. once every 24 hou
 
 Since blastlevel keeps a primary database containing all of the existing sequences and a secondary database containing all sequences that have been added or modified since last BLAST db rebuild, if a sequence is changed then the new version will be added to the secondary BLAST db while the old version is still present in the primary BLAST db. 
 
-When a BLAST query is executed then it is first run against the secondary BLAST db (if one exists) and a tally of all results is kept in memory as a list of IDs that had query results for their sequences. Then afterwards the query is run against the primary BLAST db and if any of the query results are for IDs that match the list of previous results then they are ignored.
+TODO complete this
 
 # Design decisions and BLAST+ limitations 
 

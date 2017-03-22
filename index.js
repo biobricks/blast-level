@@ -1,20 +1,18 @@
 /*
 
-  !!!!!!!!!!!!!!!!
-  * What if a sequence is updated, the new sequence written to the update db and then updated again. A BLAST query that only finds the old sequence will give a wrong result!
-  ** Keep a hash of the sequence in the FASTA header and check against hash of sequence in leveldb before reporting results
-  ** When we implement support for large sequences in files then we'll simply save the hash for each file in a separate file so we don't to re-compute when we query
-  ** We should also do this for in-db sequences actually, but if there is no seqHash key set for blast-level then it will simply fall back to re-computing
+  ToDos:
+
+  * Implement blastx, tblastx and tblastn
+  ** See here for different uses: https://en.wikipedia.org/wiki/BLAST#Program
+
+  * When we implement support for large sequences in files then we'll simply save the hash for each sequence in each file in leveldb so we don't re-compute when we query
+  ** We should also do this for in-db sequences actually, but if there is no seqHash key set for blast-level then it should simply fall back to re-computing the hash
 
   !!!!!!!!!!!!!!!!
 
   ToDo
  
-  Wednesday:
-  * Get the query count and auto-delete of old dbs working
 
-  * Parse JSON query results and stream leveldb results.
-  ** Make sure to check hashes
   * Keep track of streamed keys and ensure no dupes.
   * Add support for a function as seqProp (use _resolvePropPath)
   * Switch away from level-changes so we can get batch directly
@@ -79,10 +77,13 @@ function hashOp(type, key, value) {
   return h.digest('base64');
 }
 
-// hash a string
-function hash(str) {
+// hash one or more arguments
+function hash() {
   var h = crypto.createHash('sha256');
-  h.update(str);
+  var i;
+  for(i=0; i < arguments.length; i++) {
+    h.update(arguments[i]);
+  }
   return h.digest('base64');
 }
 
@@ -108,13 +109,16 @@ function BlastLevel(db, opts) {
   if(!(this instanceof BlastLevel)) return new BlastLevel(db, opts);
 
   opts = xtend({    
-    mode: 'blastdb', // 'blastdb' or 'direct' (slower) or 'streaming' (very slow)
+    mode: 'blastdb', // 'blastdb' or 'direct' (slower)
+    type: 'nt', // 'nt' for nucleotide database. 'aa' for amino acid database
     seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
     path: undefined, // path to use for storing BLAST database (blastdb mode only)
     listen: true, // listen for changes on db and update db automatically
     rebuild: false, // rebuild the BLAST index now
     rebuildOnChange: false, // rebuild the main BLAST db whenever the db is changed
     binPath: undefined, // path where BLAST+ binaries are located if not in PATH
+    filterDupes: true, // filter dupe query hits. only relevant in 'blastdb' mode when rebuildOnChange is false since otherwise there will never be dupes
+    filterChanged: true, // filter seqs that have changed since last rebuild. only relevant in 'blastdb' mode when buildOnChange is false
     debug: false // turn debug output on or off
   }, opts);
   this.opts = opts;
@@ -122,6 +126,17 @@ function BlastLevel(db, opts) {
   this._queryCount = {}; // number of active queries for each db, indexed by name
   this._toDelete = [];
 
+  this.opts.type = this.opts.type.toLowerCase();
+  if(['nt', 'aa'].indexOf(this.opts.type) < 0) {
+    throw new Error("opts.type must be either 'nt' or 'aa'");
+  }
+
+  // there will never be changed sequences nor dupes
+  // if we're rebuilding on every change nor if we're not using 'blastdb' mode
+  if(opts.rebuildOnChange || opts.mode !== 'blastdb') {
+    this.opts.filterDupes = false;
+    this.opts.filterChanged = false;
+  }
 
   if(opts.mode === 'blastdb' && !opts.path) {
     throw new Error("opts.path must be specified in 'blastdb' mode");
@@ -518,6 +533,15 @@ function BlastLevel(db, opts) {
   };
 
 
+  // check if a sequence hash is correct
+  this._checkHash = function(value, hashVal) {
+    var seq = this._seqFromVal(value);
+    if(hash(seq) !== hashVal) {
+      return false;
+    }
+    return true;
+  };
+
   this._levelRowFromBlastHit = function(hit, cb) {
     if(!hit || !hit.description || !hit.description.length || !hit.description[0].title) {
       return cb();
@@ -525,13 +549,22 @@ function BlastLevel(db, opts) {
     var o;
     try {
       o = JSON.parse(hit.description[0].title);
-      throw new Error("FOO"); // TODO can we fix this with pump
     } catch(e) {
       return cb(e);
     }
 
+    var self = this;
+
     this.db.get(o.key, function(err, value) {
       if(err) return cb(err);
+
+      // If the sequence changed in leveldb since the
+      // this BLAST database was rebuilt, then the hash will be different.
+      // We don't want to report such results since they could be false hits.
+      // The current BLAST update db should contain the updated version of
+      // the sequence and so the BLAST results should still contain the
+      // actual hit (if one exists).
+      if(self.opts.filterChanged && !self._checkHash(value, o.hash)) return cb();
 
       o = {
         key: o.key,
@@ -565,9 +598,6 @@ function BlastLevel(db, opts) {
     }
     
     var dbPath = path.join(self.opts.path, name);
-//    console.log("");
-//    console.log("---------------------------------------------");
-//    console.log("creating blast db:", dbPath);
 
     var cmd = path.join(this.opts.binPath, "makeblastdb");
     var args = ["-dbtype", "nucl", "-title", "'blastlevel'", "-out", dbPath];
@@ -875,20 +905,24 @@ function BlastLevel(db, opts) {
       cb = opts;
       opts = {};
     }
+
     if(!self._hasBlastDBs()) {
       return cb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
     }
 
     opts = xtend({
-      type: undefined, // or 'blastn' or 'blastp'. auto-detects if undefined
-      output: 'stream' // 'stream', 'array', 'blast' or 'blastraw'
+      output: 'stream', // 'stream', 'array', 'blast' or 'blastraw',
+      type: (this.opts.type === 'aa') ? 'blastp' : 'blastn' // can be 'blastn', 'blastp', 'blastx', 'tblastx' or 'tblastn'
     }, opts || {});
 
-    if(!opts.type) {
-      if(seq.match(/[^ACGT\s]/i)) {
-        opts.type = 'blastp';
-      } else {
-        opts.type = 'blastn';
+    // check if opts.type is sane
+    if(this.opts.type === 'aa')  {
+      if(['blastp', 'blastx'].indexOf(opts.type) < 0) {
+        throw new Error("invalid query type attempted on protein database");
+      }
+    } else { // this.opts.type === 'nt'
+      if(['blastn', 'tblastx', 'tblastn'].indexOf(opts.type) < 0) {
+        throw new Error("invalid query type attempted on nucleotide database");
       }
     }
 
@@ -898,12 +932,22 @@ function BlastLevel(db, opts) {
     var dbName = qdbs.join(' ');
     var cmd, args;
 
-    if(opts.type === 'blastn') {
-      cmd = path.join(this.opts.binPath, "blastn");
-      args = ["-task", "blastn-short", "-outfmt", "15", "-db", dbName];
+    var task = opts.type;
+
+    if(seq.length < 30) { // auto-switch to '-short' tasks for blastn and blastp
+      if(task === 'blastn') {
+        task = 'blastn-short';
+      } else if(type === 'blastp') {
+        task = 'blastp-short';
+      }
+    }
+
+    if(opts.type === 'blastn' || opts.type === 'blastp') {
+      cmd = path.join(this.opts.binPath, opts.type);
+      args = ["-task", task, "-outfmt", "15", "-db", dbName];
     } else {
-      // TODO support blastp
-      throw new Error("blastp not implemented");
+      // TODO support blastx, tblastx and tblastn
+      throw new Error("only blastn and blastp queries are supported for now");
     }
 
 //    console.log("RUNNING:", cmd, args.join(' '));
@@ -914,9 +958,10 @@ function BlastLevel(db, opts) {
       // create a callback that emits an error or ends the stream
       cb = function(err, results) {
         if(err) {
-          from.obj(function(size, next) {
-            next(err);
-          }).pipe(outStream);
+          outStream.emit('error', err);
+//          from.obj(function(size, next) {
+//            next(err);
+//          }).pipe(outStream);
           return;
         }
         if(!results || !results.length) {
@@ -986,12 +1031,42 @@ function BlastLevel(db, opts) {
 
       output = output.BlastOutput2[0].report.results.search.hits;
 
+      // keep track of hits to avoid dupes
+      var hits = {};
+
+      function checkDupe(row) {
+        // TODO are these properties enough to ensure hit unqiueness?
+        var h = hash(row.key, row.hsps.hseq, row.hsps.hit_from.toString(), row.hsps.hit_strand);
+        if(hits[h]) return true;
+
+        hits[h] = true;
+        return false;
+      }
+
       function nextResult(size, next) {
         if(i > output.length - 1) return next(null, null);
         
         self._levelRowFromBlastHit(output[i++], function(err, row) {
           if(err) return cb(err);
+
+          // If this blast hit didn't have a value in the database
+          // then it must have been deleted from leveldb since the
+          // blast database was last rebuilt. Just skip it.
           if(!row) {
+            process.nextTick(function() {
+              nextResult(size, next);
+            });
+          }
+
+          // If this blast hit is a duplicate.
+          // Meaning that we already had the exact same hit
+          // at the same location in the same sequence for this query.
+          // Then ignore.
+          // It's because the leveldb entry was changed
+          // without the sequence being changed.
+          // Which caused the sequence to appear both in the
+          // main db and the update db.          
+          if(self.opts.filterDupes && checkDupe(row)) {
             process.nextTick(function() {
               nextResult(size, next);
             });
@@ -1003,7 +1078,14 @@ function BlastLevel(db, opts) {
 
       var i = 0;
       if(outStream) {
-        from.obj(nextResult).pipe(outStream);
+        var s = from.obj(nextResult);
+        s.pipe(outStream);
+
+        // forward errors
+        s.on('error', function(err) {
+          outStream.emit('error', err);
+        })
+
         return;
       }      
 
