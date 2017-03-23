@@ -56,6 +56,7 @@ var changes = require('level-changes');
 var rimraf = require('rimraf');
 var EventEmitter = require('events').EventEmitter;
 var PassThrough = require('readable-stream').PassThrough;
+var isStream = require('isstream');
 
 // hash an operation
 function hashOp(type, key, value) {
@@ -111,7 +112,11 @@ function BlastLevel(db, opts) {
   opts = xtend({    
     mode: 'blastdb', // 'blastdb' or 'direct' (slower)
     type: 'nt', // 'nt' for nucleotide database. 'aa' for amino acid database
-    seqProp: 'sequence', // property of db values that contain the DNA/AA sequence
+    seqProp: 'sequence', // property of leveldb value that contains the DNA/AA sequence
+    seqFormatted: false, // false if plaintext, true if FASTA, GenBank, SBOL, etc. 
+    seqIsFile: false, // is seqProp a path to a file or array of files (or a function that returns a path to a file or array of files)? if false then seqProp should be a string or array of strings or a function returning either of those.
+    seqFileBasePath: '.', // if seqIsFile, this is the base path
+    seqFileEncoding: 'utf8',
     path: undefined, // path to use for storing BLAST database (blastdb mode only)
     listen: true, // listen for changes on db and update db automatically
     rebuild: false, // rebuild the BLAST index now
@@ -505,9 +510,27 @@ function BlastLevel(db, opts) {
   };
 
 
+  this._getFileStream = function(filePath) {
+    if(!this.opts.seqFormatted) {
+      return fs.createReadStream(path.join(this.seqFileBasePath, filePath), {encoding: this.opts.seqFileEncoding});
+    }
+
+    // TODO implement with streaming-sequence-extractor
+    throw new Error("not implemented");
+  };
+
   // get the sequence data from a leveldb value
   this._seqFromVal = function(val) {
-    return this._resolvePropPath(val, this.opts.seqProp);
+    var out = this._resolvePropPath(val, this.opts.seqProp);
+    if(!this.opts.seqIsFile) {
+      return out;
+    }
+    
+    if(!(out instanceof Array)) {
+      return this._getFileStream(out);
+    }
+
+    // we're dealing with an array of files
   }
   
 
@@ -667,26 +690,50 @@ function BlastLevel(db, opts) {
   // and turn it into fasta-formatted output that can be
   // referenced back to the leveldb entry by keeping
   // the id and hash as JSON in the FASTA header
-  this._fastaFormat = function(data) {
-    var seq = this._seqFromVal(data.value);
+  // TODO make this streaming (or at least the hashing)
+  this._fastaFormat = function(key, seq, index) {
     var header = {
-      key: data.key,
+      key: key,
       hash: hash(seq)
     };
+    if(index) {
+      header.index = index;
+    }
     var line = "> " + JSON.stringify(header) + "\n" + seq + "\n";
     return line;
   };
 
-  // create stream of sequences
+
+  // create a stream that takes as input leveldb values
+  // and outputs a stream of FASTA sequences with
+  // the header referencing the original FASTA sequence
   this._seqStream = function() {
     var self = this;
-    
+    var seq, i;
     // TODO assuming object mode stream (what if it's a string or buffer?)
     var seqStream = through.obj(function(data, enc, cb) {
-      if(data.value && self._seqFromVal(data.value)) {
-        this.push(self._fastaFormat(data));
+
+      if(!data.value) return cb();
+
+      seq = self._seqFromVal(data.value);
+      if(!seq) return cb();
+      if(isStream(seq)) {
+        
+        // TODO handle streams
+        throw new Error("not not yet implemented")
+        
+      } else { // 
+
+        if(seq instanceof Array) {
+          for(i=0; i < i.length; i++) {
+            this.push(self._fastaFormat(data.key, seq[i], i));
+          }
+        } else {
+          this.push(self._fastaFormat(data.key, seq));
+        }
+        
+        cb();
       }
-      cb();
     });
     
     return seqStream;
