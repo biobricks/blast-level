@@ -11,7 +11,6 @@
   !!!!!!!!!!!!!!!!
 
   ToDo
- 
 
   * Keep track of streamed keys and ensure no dupes.
   * Add support for a function as seqProp (use _resolvePropPath)
@@ -57,6 +56,7 @@ var rimraf = require('rimraf');
 var EventEmitter = require('events').EventEmitter;
 var PassThrough = require('readable-stream').PassThrough;
 var isStream = require('isstream');
+var sse = require('streaming-sequence-extractor');
 
 // hash an operation
 function hashOp(type, key, value) {
@@ -113,6 +113,7 @@ function BlastLevel(db, opts) {
     mode: 'blastdb', // 'blastdb' or 'direct' (slower)
     type: 'nt', // 'nt' for nucleotide database. 'aa' for amino acid database
     seqProp: 'sequence', // property of leveldb value that contains the DNA/AA sequence
+    changeProp: 'updated', // property of leveldb value that contains a value that will have changed if the sequence was changed, e.g. a timestamp for when the leveldb value was last updated or a hash of the sequence
     seqFormatted: false, // false if plaintext, true if FASTA, GenBank, SBOL, etc. 
     seqIsFile: false, // is seqProp a path to a file or array of files (or a function that returns a path to a file or array of files)? if false then seqProp should be a string or array of strings or a function returning either of those.
     seqFileBasePath: '.', // if seqIsFile, this is the base path
@@ -145,6 +146,10 @@ function BlastLevel(db, opts) {
 
   if(opts.mode === 'blastdb' && !opts.path) {
     throw new Error("opts.path must be specified in 'blastdb' mode");
+  }
+
+  if(!opts.changeProp && !opts.rebuildOnChange) {
+    throw new Error("opts.changeProp must be specified in 'blastdb' mode unless opts.rebuildOnChange is true");
   }
 
   if(!db) {
@@ -510,27 +515,54 @@ function BlastLevel(db, opts) {
   };
 
 
-  this._getFileStream = function(filePath) {
-    if(!this.opts.seqFormatted) {
-      return fs.createReadStream(path.join(this.seqFileBasePath, filePath), {encoding: this.opts.seqFileEncoding});
-    }
+  this._pushFile = function(filePath, key, index, change, other, cb) {
+    var self = this;
+    var s = fs.createReadStream(path.join(this.seqFileBasePath, filePath), {encoding: this.opts.seqFileEncoding});
+    s.on('error', cb);
 
-    // TODO implement with streaming-sequence-extractor
-    throw new Error("not implemented");
+    if(!this.opts.seqFormatted) {
+      
+      other.push(this._fastaHeader(key, index, change));
+
+      s.on('data', other.push);
+      s.on('end', cb);
+      
+    } else { 
+      
+      if(!index) {
+        index = 0;
+      }
+
+      var type = (this.opts.type === 'nt') ? 'na' : 'aa';
+
+      var seqStream = sse(type, {
+        convertToExpected: true,
+        header: function(count) {
+          return self._fastaHeader(key, index + count, change)
+        }
+      });
+
+      seqStream.on('error', cb);
+      seqStream.on('data', other.push);
+      seqStream.on('end', cb);
+
+    }
   };
+
+  this._changeFromVal = function(val) {
+    var change = this._resolvePropPath(val, this.opts.changeProp);
+    if(change instanceof Date) {
+      return change.getTime();
+    }
+    if(typeof change === 'object') {
+      return JSON.stringify(change);
+    }
+    return change;
+  }
 
   // get the sequence data from a leveldb value
   this._seqFromVal = function(val) {
-    var out = this._resolvePropPath(val, this.opts.seqProp);
-    if(!this.opts.seqIsFile) {
-      return out;
-    }
-    
-    if(!(out instanceof Array)) {
-      return this._getFileStream(out);
-    }
-
-    // we're dealing with an array of files
+    return this._resolvePropPath(val, this.opts.seqProp);
   }
   
 
@@ -686,21 +718,25 @@ function BlastLevel(db, opts) {
     });
   };
 
+
+  this._fastaHeader = function(key, index, change) {
+    var header = {
+      key: key,
+      change: change
+    };
+    if(index !== undefined) {
+      header.index = index;
+    }
+    return "> " + JSON.stringify(header) + "\n";;
+  };
+  
   // Take a leveldb entry object (with .key and .value) 
   // and turn it into fasta-formatted output that can be
   // referenced back to the leveldb entry by keeping
   // the id and hash as JSON in the FASTA header
   // TODO make this streaming (or at least the hashing)
-  this._fastaFormat = function(key, seq, index) {
-    var header = {
-      key: key,
-      hash: hash(seq)
-    };
-    if(index) {
-      header.index = index;
-    }
-    var line = "> " + JSON.stringify(header) + "\n" + seq + "\n";
-    return line;
+  this._fastafy = function(key, seq, index, change) {
+    return this._fastaHeader(key, index, change) + seq + "\n\n";
   };
 
 
@@ -709,30 +745,50 @@ function BlastLevel(db, opts) {
   // the header referencing the original FASTA sequence
   this._seqStream = function() {
     var self = this;
-    var seq, i;
+    var seq, filePath, change, i;
     // TODO assuming object mode stream (what if it's a string or buffer?)
     var seqStream = through.obj(function(data, enc, cb) {
 
       if(!data.value) return cb();
 
       seq = self._seqFromVal(data.value);
-      if(!seq) return cb();
-      if(isStream(seq)) {
-        
-        // TODO handle streams
-        throw new Error("not not yet implemented")
-        
-      } else { // 
+      change = self._changeFromVal(data.value);
+      if(!seq || !change) return cb();
+
+      if(!self.opts.seqIsFile) {
+
+        // TODO handle non-file formatted streams
+        if(this.opts.seqFormatted) {
+          throw new Error("not implemented");
+        }
 
         if(seq instanceof Array) {
           for(i=0; i < i.length; i++) {
-            this.push(self._fastaFormat(data.key, seq[i], i));
+            this.push(self._fastafy(data.key, seq[i], i, change));
           }
         } else {
-          this.push(self._fastaFormat(data.key, seq));
+          this.push(self._fastafy(data.key, seq, undefined, change));
         }
         
         cb();
+   
+      } else { 
+        filePath = seq;
+
+        if(filePath instanceof Array) {
+
+          i = 0;
+          async.eachSeries(filePath, function(filePath, cb) {
+            
+            self._pushFile(filePath, key, i++, change, this, cb);
+
+          }, cb);
+
+        } else {
+          
+          self._pushFile(filePath, key, undefined, change, this, cb);
+
+        }
       }
     });
     
