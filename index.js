@@ -1,42 +1,3 @@
-/*
-
-  ToDos:
-
-  * Implement blastx, tblastx and tblastn
-  ** See here for different uses: https://en.wikipedia.org/wiki/BLAST#Program
-
-  * When we implement support for large sequences in files then we'll simply save the hash for each sequence in each file in leveldb so we don't re-compute when we query
-  ** We should also do this for in-db sequences actually, but if there is no seqHash key set for blast-level then it should simply fall back to re-computing the hash
-
-  !!!!!!!!!!!!!!!!
-
-  ToDo
-
-  * Keep track of streamed keys and ensure no dupes.
-  * Add support for a function as seqProp (use _resolvePropPath)
-  * Switch away from level-changes so we can get batch directly
-  * Direct .put, .del and .batch (both in listen and no listen modes)
-
-  * Add support for direct mode (should be pretty simple)
-
-  Test:
-  
-  * Multiple puts without full rebuild, both changes and additions, then query
-  * Rebuild after above test, then multiple puts
-  * Test opts.rebuildOnChange == true
-
-
-  How do we find latest main database when initializing? If we look at highest number or most recently changed then it could be a partially written database (if app crashed mid-write). Are any of the several files not actually written until the database has finished building?
-
-  When initialized the name of the current update dbs should be found by looking for the db called 'update*.nin' that was most recently modified or with the largest file size (looking at file size would protect against opening a partially written db in case of a crash, but won't work for main db). 
-
-  If a put is a change, how do we ensure that only the new version is reported?
-  Can we just search the databases in the right order and ignore all other than the first hit for that key?
-  That's what we're doing now. Test that it works.
-
-  What do we do about rebuild_counter overflows? Look at NOTES
-
-*/
 
 var spawn = require('child_process').spawn;
 var exec = require('child_process').exec;
@@ -45,9 +6,6 @@ var fs = require('fs-extra');
 var util = require('util');
 var path = require('path');
 var xtend = require('xtend');
-var bytewise = require('bytewise');
-var tmp = require('tmp');
-var levelup = require('levelup');
 var through = require('through2');
 var from = require('from2');
 var async = require('async');
