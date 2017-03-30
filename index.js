@@ -112,18 +112,18 @@ function BlastLevel(db, opts) {
   opts = xtend({    
     mode: 'blastdb', // 'blastdb' or 'direct' (slower)
     type: 'nt', // 'nt' for nucleotide database. 'aa' for amino acid database
-    seqProp: undefined, // property of leveldb value that contains the DNA/AA sequence
+    seqProp: undefined, // property of leveldb value that contains the DNA/AA sequence or file path
     changeProp: undefined, // property of leveldb value that contains a value that will have changed if the sequence was changed, e.g. a timestamp for when the leveldb value was last updated or a hash of the sequence
+    filterChanged: true, // filter seqs that have changed since last rebuild. only relevant in 'blastdb' mode when buildOnChange is false
     seqFormatted: false, // false if plaintext, true if FASTA, GenBank, SBOL, etc. 
     seqIsFile: false, // is seqProp a path to a file or array of files (or a function that returns a path to a file or array of files)? if false then seqProp should be a string or array of strings or a function returning either of those.
     seqFileBasePath: '.', // if seqIsFile, this is the base path
     seqFileEncoding: 'utf8',
     path: undefined, // path to use for storing BLAST database (blastdb mode only)
-    listen: true, // listen for changes on db and update db automatically
+    listen: true, // listen for changes on level db and update BLAST db automatically
     rebuild: false, // rebuild the BLAST index now
     rebuildOnChange: false, // rebuild the main BLAST db whenever the db is changed
     binPath: undefined, // path where BLAST+ binaries are located if not in PATH
-    filterChanged: true, // filter seqs that have changed since last rebuild. only relevant in 'blastdb' mode when buildOnChange is false
     debug: false // turn debug output on or off
   }, opts);
   this.opts = opts;
