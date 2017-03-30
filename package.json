@@ -1,6 +1,6 @@
 {
   "name": "blast-level",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "dependencies": {
     "abstract-leveldown": "^2.6.1",
     "async": "^2.0.1",
