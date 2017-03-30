@@ -1,4 +1,32 @@
 
+      function checkDupe(row) {
+        // TODO are these properties enough to ensure hit unqiueness?
+        var h = crypto.createHash('sha256');
+        h.update(row.key);
+//        console.log("checking dupe:", row)
+        if(row.index) {
+          h.update(row.index.toString());
+        }
+
+        var hsps = row.hsps;
+
+        // assume it's not a dupe if we can't check
+        if(!hsps || !hsps.length) return false; 
+
+        var i;
+        for(i=0; i < hsps.length; i++) {
+          h.update(hsps[i].hseq);
+          h.update(hsps[i].hit_from.toString());
+          h.update(hsps[i].hit_strand);
+        }
+        h = h.digest('base64');
+        
+        if(hits[h]) return true;
+
+        hits[h] = true;
+        return false;
+      }
+
 # query protection
 
 Keep an object with a key for each database where a query is currently running where the value is a counter showing how many queries are in progress for the database. Whenever a query completes, decrement the counter for the db the query was performed on. If the db the query was performed on is no longer the current database and the counter is zero then delete that database. 
