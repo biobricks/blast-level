@@ -13,6 +13,7 @@ var tmpDir = tmp.dirSync({
 
 var blastDB = blastLevel(db, {
   seqProp: 'seq', // key in 'mydb' that stores the sequence data
+  changeProp: 'updated',
   path: tmpDir.name, // directory to use for storing BLAST db
   rebuild: false, // rebuild the BLAST index when the db is opened
   listen: false, // listen for changes on level db and auto update BLAST db
