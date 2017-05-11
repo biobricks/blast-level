@@ -17,8 +17,7 @@ var blastDB = blastLevel(db, {
   path: tmpDir.name, // directory to use for storing BLAST db
   rebuild: false, // rebuild the BLAST index when the db is opened
   listen: false, // listen for changes on level db and auto update BLAST db
-  useUpdateDB: true, // keep changes since last rebuild in separate BLAST db
-  //    debug: true,
+//    debug: true,
   binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
 });
 
@@ -35,21 +34,23 @@ function fail(err) {
   process.exit(1);
 }
 
-setTimeout(function() {
+
 db.put('foo-'+r(), {
-  seq: "GATTACACATTACA"
+  seq: "GATTACACATTACA",
+  updated: new Date().getTime()
 }, function(err) {
   if(err) fail(err);
 
   console.log("added foo");
 
   console.log("building blast index");
-  
+
   blastDB.rebuild(function(err) {
     if(err) return console.error("Error:", err);
     
     db.put('bar-'+r(), {
-      seq: "CATCATCATATTACACATTACCATCATCAT"
+      seq: "CATCATCATATTACACATTACCATCATCAT",
+      updated: new Date().getTime()
     }, function(err) {
       if(err) fail(err);
       
@@ -57,7 +58,7 @@ db.put('foo-'+r(), {
       
       
       console.log("rebuilding blast index");
-      
+
       blastDB.rebuild(function(err) {
         if(err) return console.error("Error:", err);
         
@@ -78,7 +79,6 @@ db.put('foo-'+r(), {
     });
   });
 })
-}, 300);
 /*
 
   echo -e "> foo\nGATTACACATTACA" | ./blastn -db /tmp/blastdb/main -task blastn-short

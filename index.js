@@ -85,6 +85,7 @@ function BlastLevel(db, opts) {
     debug: false // turn debug output on or off
   }, opts);
   this.opts = opts;
+  if(!this.opts.binPath) this.opts.binPath = '';
 
   this._queryCount = {}; // number of active queries for each db, indexed by name
   this._toDelete = [];
@@ -251,7 +252,6 @@ function BlastLevel(db, opts) {
   this._processPuts = function(changes, cb) {
     cb = cb || function(){};
     if(!(changes instanceof Array)) changes = [changes];
-
 
     if(!this._dbs.main.exists) {
       this._rebuild('main', cb);
@@ -654,7 +654,6 @@ function BlastLevel(db, opts) {
         opts.stream.pipe(seqStream);
 
       } else { // no stream specified so make a stream from entire database
-
         // TODO assuming JSON values (what if it's a string or buffer?)
         this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
       }
@@ -708,7 +707,7 @@ function BlastLevel(db, opts) {
   // the id and hash as JSON in the FASTA header
   // TODO make this streaming (or at least the hashing)
   this._fastafy = function(key, seq, index, change) {
-    return this._fastaHeader(key, index, change) + seq + "\n\n";
+    return ">" + this._fastaHeader(key, index, change) + "\n" + seq + "\n\n";
   };
 
 
@@ -730,14 +729,15 @@ function BlastLevel(db, opts) {
 
       seq = self._seqFromVal(data.value);
       change = self._changeFromVal(data.value);
+
 //      console.log('---------------------------', seq, change);
       if(!seq || !change) return cb();
 
       if(!self.opts.seqIsFile) {
 
         // TODO handle non-file formatted streams
-        if(this.opts.seqFormatted) {
-          throw new Error("not implemented");
+        if(self.opts.seqFormatted) {
+          throw new Error("TODO not implemented");
         }
 
         if(seq instanceof Array) {
@@ -998,9 +998,23 @@ function BlastLevel(db, opts) {
     }
 
     opts = xtend({
-      output: 'stream', // 'stream', 'array', 'blast' or 'blastraw',
+
+      // output defaults to 'array' if cb is specified and 'stream' if not
+      output: undefined, // 'stream', 'array', 'blast' or 'blastraw',
       type: (this.opts.type === 'aa') ? 'blastp' : 'blastn' // can be 'blastn', 'blastp', 'blastx', 'tblastx' or 'tblastn'
     }, opts || {});
+
+    // assume that output is stream 
+    if(cb) {
+      opts.output = opts.output || 'array';
+    } else {
+      opts.output = 'stream';
+    }
+
+    // TODO support 'blast' and 'blastraw' outputs
+    if(opts.output == 'blast' || opts.output == 'blastraw') {
+      throw new Error("TODO not implemented");
+    }
 
     // check if opts.type is sane
     if(this.opts.type === 'aa')  {
@@ -1118,6 +1132,8 @@ function BlastLevel(db, opts) {
       // keep track of hits to avoid dupes
       var hits = {};
 
+      var i = 0;
+
       function nextResult(size, next) {
         if(i > output.length - 1) return next(null, null);
 
@@ -1138,17 +1154,27 @@ function BlastLevel(db, opts) {
         })
       }
 
-      var i = 0;
-      if(outStream) {
-        var s = from.obj(nextResult);
-        s.pipe(outStream);
+      var s = from.obj(nextResult);
 
+      if(outStream) {
+        s.pipe(outStream);
         // forward errors
         s.on('error', function(err) {
           outStream.emit('error', err);
         })
         return;
-      }      
+      } else {
+
+        var results = [];
+        s.on('data', function(data) {
+          results.push(data);
+        });
+
+        s.on('end', function() {
+          cb(null, results);
+        });
+        s.on('error', cb);
+      }
     });
 
     blast.stdin.end(seq, 'utf8');
