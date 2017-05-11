@@ -8,7 +8,7 @@ var db = memdb({valueEncoding: 'json'});
 
 // create temporary dir for blast db storage
 var tmpDir = tmp.dirSync({
-//  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
+  unsafeCleanup: true // auto-delete dir on close, even if it isn't empty
 });
 
 var blastDB = blastLevel(db, {
@@ -17,8 +17,7 @@ var blastDB = blastLevel(db, {
   path: tmpDir.name, // directory to use for storing BLAST db
   rebuild: false, // rebuild the BLAST index when the db is opened
   listen: false, // listen for changes on level db and auto update BLAST db
-//    debug: true,
-  binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
+//    debug: true
 });
 
 blastDB.on('error', function(err) {

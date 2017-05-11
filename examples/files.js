@@ -22,11 +22,8 @@ var blastDB = blastLevel(db, {
   seqFormatted: true,
   changeProp: 'updated',
   path: tmpDir.name, // directory to use for storing BLAST db
-//  path: '/tmp/foo',
-//  rebuild: true, // rebuild the BLAST index when the db is opened
   rebuildOnChange: false,
-  listen: true, // listen for changes on level db and auto update BLAST db
-  binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
+  listen: true // listen for changes on level db and auto update BLAST db
   //    debug: true,
 });
 

@@ -19,12 +19,8 @@ var blastDB = blastLevel(db, {
   seqProp: 'seq', // key in 'mydb' that stores the sequence data
   changeProp: 'updated',
   path: tmpDir.name, // directory to use for storing BLAST db
-//  path: '/tmp/foo',
-//  rebuild: true, // rebuild the BLAST index when the db is opened
-  rebuildOnChange: false,
   listen: true, // listen for changes on level db and auto update BLAST db
-  //    debug: true,
-  binPath: "/home/juul/projects/bionet/blast/ncbi-blast-2.4.0+/bin"
+  //    debug: true
 });
 
 blastDB.on('error', function(err) {
@@ -40,10 +36,9 @@ function fail(err) {
   process.exit(1);
 }
 
-setTimeout(function() {
-
 db.put('foo-'+r(), {
-  seq: "GATTACACATTACA"
+  seq: "GATTACACATTACA",
+  updated: new Date().getTime()
 }, function(err) {
   if(err) fail(err);
 
@@ -53,28 +48,31 @@ db.put('foo-'+r(), {
 
   
   db.put('bar-'+r(), {
-    seq: "CATCATCATATTACACATTACCATCATCAT"
+    seq: "CATCATCATATTACACATTACCATCATCAT",
+    updated: new Date().getTime()
   }, function(err) {
     if(err) fail(err);
     
     console.log("added bar");    
-
-    setTimeout(function() {
+    
+    db.put('baz-'+r(), {
+      seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA",
+      updated: new Date().getTime()
+    }, function(err) {
+      if(err) fail(err);
       
-      db.put('baz-'+r(), {
-        seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA"
+      console.log("added baz");
+      
+      db.put('fourth-'+r(), {
+        seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA",
+        updated: new Date().getTime()
       }, function(err) {
         if(err) fail(err);
         
-        console.log("added baz");
+        console.log("added fourth");
         
-        db.put('fourth-'+r(), {
-          seq: "CATCATCATATTACACAAAAAAAAAAAAAAAAAAA"
-        }, function(err) {
-          if(err) fail(err);
-          
-          console.log("added fourth");
-          
+        setTimeout(function() {
+
           var s = blastDB.query("ATTACACATTAC");
 
           s.on('data', function(data) {
@@ -88,29 +86,10 @@ db.put('foo-'+r(), {
           s.on('end', function() {
             console.log("end of blast results");
           });
-
-/*
-          blastDB.query("ATTACACATTAC", function(err, results) {
-            if(err) return console.error("Error:", err);
-            
-
-            console.log(results[0].hsps);
-            
-          }, function(err) {
-            if(err) return console.error("Error:", err);
-            
-            console.log("end of results");
-            
-          });
-*/
           
-        });
+        }, 500); 
       });
-
-    }, 500);
+    });
   });
+});
 
-
-})
-
-}, 1000);
