@@ -5,11 +5,24 @@ WARNING: This module is not yet ready for production use. Proceed with caution.
 
 # Dependencies
 
-Ensure that you have a recent [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download) installed on your system:
+Ensure that you have a recent [NCBI BLAST+](https://blast.ncbi.nlm.nih.gov/Blast.cgi?PAGE_TYPE=BlastDocs&DOC_TYPE=Download) installed on your system. You need version `2.4.0` or later. 
+
+You might be able to get away with:
 
 ```
 sudo apt install ncbi-blast+
 ```
+
+Otherwise, download the latest version from the above link and unzip the binaries into `/usr/local/bin`.
+
+You can check if the correct BLAST+ binaries are installed using:
+
+```
+require('blast-level').check([binPath], [cb])
+```
+
+Where the optional binPath is your path to the BLAST tools. 
+
 
 Install required node modules:
 
@@ -116,6 +129,15 @@ The option `seqProp` must be defined. Additionally `path` must be defined in 'bl
 `seqProp` can be a simple property name like 'sequence' or it can be a property path like 'foo.bar.baz.sequence'. It can also be a synchronous function that takes the value as its only argument and returns the sequence or file path. If the value is undefined for a leveldb value then that value will be skipped.
 
 `changeProp` is like `seqProp` but must reference/return a value that changes whenever the sequence for that leveldb value changes. This could be a hash of the sequence but it could also simply be the time-date when the value was last updated.
+
+
+## query(sequence, [opts], [cb])
+
+Run a query on the BLAST database. If cb is not specified then a stream is returned with the results. If cb is specified then an array of results is handed to the callback.
+
+## check([cb])
+
+Check if the correct versions of all required NCBI BLAST+ binaries are installed. If no callback is specified then prints the results to stdout/stderr.
 
 # Implementation
 

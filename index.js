@@ -16,6 +16,57 @@ var PassThrough = require('readable-stream').PassThrough;
 var isStream = require('isstream');
 var sse = require('streaming-sequence-extractor');
 
+
+
+
+function checkCommand(cmd, cb) {
+  var minVersion = '2.4.0';
+  minVersion = minVersion.split('.');
+
+  cmd += " -version";
+
+  function versionError(version) {
+    return new Error("Installed NCBI BLAST+ version is too low: I need minimum version " + minVersion.join('.') + " and you have version " + version.join('.'));
+  }
+
+
+  exec(cmd, function(err, stdout, stderr) {
+    if(err) throw err;
+    
+    var m = stdout.match(/blast\s+(\d+\.\d+\.\d)+/i);
+    if(!m) return cb(new Error("Did not get version from: " + cmd + "\nInstead got: " + stdout));
+    
+    var version = m[1].split('.');
+    var i;
+    for(i=0; i < version.length; i++) {
+      if(version[i] > minVersion[i]) return cb();
+      if(version[i] < minVersion[i]) return cb(versionError(version));
+    }
+
+    cb();
+  });
+}
+
+function checkCommands(binPath, cb) {
+  if(typeof binPath === 'function') {
+      cb = binPath;
+      binPath = undefined;
+  }
+
+  if(!cb) cb = function(err) {
+    if(err) return console.error(err);
+    console.log("Success! You have all of the necessary NCBI BLAST+ tools installed and their versions are compatible with blast-level.");
+  };
+
+  var cmds = ['makeblastdb', 'blastn', 'blastp', 'blastx', 'tblastx', 'tblastn'];
+
+  cmds = cmds.map(function(cmd) {
+    return path.join(binPath || '', cmd);
+  });
+
+  async.eachSeries(cmds, checkCommand, cb);
+};
+
 // hash an operation
 function hashOp(type, key, value) {
 
@@ -1188,10 +1239,15 @@ function BlastLevel(db, opts) {
     this._rebuild('main', cb);
   };
 
+  this.check = function(cb) {
+    checkCommands(this.opts.binPath, cb);
+  };
 
   this._init();
 };
 
 util.inherits(BlastLevel, EventEmitter);
+
+BlastLevel.check = checkCommands;
 
 module.exports = BlastLevel;
