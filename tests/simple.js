@@ -19,6 +19,7 @@ tape('simple', function(t) {
                     blastDB.rebuild(function(err) {
                         if(err) t.fail("mysterious failure X: " + err)
                         blastDB.query("ATTACACATTAC", function(err, data) {
+                          console.log(data);
                             if(err) t.fail("mysterious failure Y: " + err)
                             for (var i in data) {
                                 delete data[i].hsps
