@@ -130,6 +130,7 @@ The option `seqProp` must be defined. Additionally `path` must be defined in 'bl
 
 `changeProp` is like `seqProp` but must reference/return a value that changes whenever the sequence for that leveldb value changes. This could be a hash of the sequence but it could also simply be the time-date when the value was last updated.
 
+If `seqFormatted` is true then [streaming-sequence-extractor](https://www.npmjs.com/package/streaming-sequence-extractor) is used to extract sequence information from FASTA, GenBank or SBOL data. The format is autodetected. This can be used with `seqIsFile` to consume sequences in a variety of formats based on file paths stored in the database.
 
 ## query(sequence, [opts], [cb])
 
@@ -138,6 +139,20 @@ Run a query on the BLAST database. If cb is not specified then a stream is retur
 ## check([cb])
 
 Check if the correct versions of all required NCBI BLAST+ binaries are installed. If no callback is specified then prints the results to stdout/stderr.
+
+## .put(key, value, [opts], cb)
+
+Same as a `.put` directly on the database but will wait for the index to finish updating before calling the callback.
+
+## .del(key, value, [opts], cb)
+
+Same as a `.del` directly on the database but will wait for the index to finish updating before calling the callback.
+
+## .batch(key, value, [opts], cb)
+
+Same as a `.batch` directly on the database but will wait for the index to finish updating before calling the callback. 
+
+Note: Chained batch mode not yet implemented.
 
 # Implementation
 
@@ -245,7 +260,7 @@ This module has only been tested on debian/ubuntu systems. It will likely work o
 
 # Copyright and license
 
-Copyright 2016, 2017 BioBricks Foundation
+Copyright 2016 - 2018 BioBricks Foundation
 
 License: AGPLv3
 

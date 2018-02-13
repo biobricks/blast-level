@@ -1,10 +1,10 @@
-var base = require('base');
+var base = require('./common/base.js');
 var fs = require('fs')
 var tape = require('tape');
 
 tape('files', function(t) {
     t.plan(7)
-    base(function(db,blastDB) {
+    base(function(db, blastDB) {
         db.put('fasta', {
             seqFile: "test.fasta",
             updated: 1

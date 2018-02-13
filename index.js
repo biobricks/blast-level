@@ -247,6 +247,7 @@ function BlastLevel(db, opts) {
     var self = this;
 
     // if we're already processing then we don't want to trigger again
+    // TODO what if we have a callback?
     if(this._processingBuffer) return;
 
     // if we're doing a complete rebuild on every change
@@ -255,9 +256,20 @@ function BlastLevel(db, opts) {
       if(!this._changed) return;
       this._processingBuffer = true;
       this._changed = false;
+
+      var changes = self._changeBuffer;
+      self._changeBuffer = [];
+
       this.rebuild(function(err) {
         self._processingBuffer = false;
-
+        
+        // Run callbacks for all changes (regardless of type)
+        // if they are present.
+        var i;
+        for(i=0; i < changes.length; i++) {
+          if(changes[i].cb) changes[i].cb(err);
+        }
+        
         // if there was a change during the rebuild, process again
         if(self._changed) self._processBuffer();
       });
@@ -276,15 +288,25 @@ function BlastLevel(db, opts) {
         changes = self._changeBuffer;
         self._changeBuffer = [];
         
-        self._processPuts(changes, cb);
+        self._processPuts(changes, function(err) {
+
+          // Run callbacks for all changes (regardless of type)
+          // if they are present.
+          var i;
+          for(i=0; i < changes.length; i++) {
+            if(changes[i].cb) changes[i].cb(err);
+          }
+
+          cb(err);
+        });
       }, function(err) {
         if(err) console.error("Processing buffer failed:", err);
         self._processingBuffer = false;
-      });
-
+      }
+    );
   };
 
-  this._onChange = function(change) {
+  this._onChange = function(change, doNotProcess) {
     if(this._shouldIgnore(change)) return;
 
     if(this.opts.rebuildOnChange) {
@@ -294,6 +316,12 @@ function BlastLevel(db, opts) {
         this._buffer(change);
       }
     }
+
+    if(doNotProcess) return;
+
+    // Note that we don't need to do anything for deletions
+    // since blast results with missing leveldb keys are
+    // simply discarded during query
 
     if(!this._ready) return;
     this._processBuffer();
@@ -363,19 +391,6 @@ function BlastLevel(db, opts) {
     throw new Error("Value must be string, array or function");
   };
   
-
-  this._onPut = function(key, value, cb) {
-
-  };
-  
-  this._onDel = function(key, cb) {
-    cb = cb || function(){};
-
-    if(this.opts.rebuildOnChange) {
-      this._rebuild('main', cb);
-    }
-  };
-
 
   this._doesBlastDBExist = function(dbName, cb) {
     var self = this;
@@ -1027,8 +1042,101 @@ function BlastLevel(db, opts) {
       });
     })
   };
-  
+ 
   // -------------- public methods below
+
+  this.get = function(key, opts, cb) {
+    return this.db.get(key, opts, cb);
+  };
+
+  this.put = function(key, value, opts, cb) {
+    if(typeof opts === 'function') {
+      cb = opts;
+      opts = {};
+    }    
+    opts = opts || {};
+
+    // if listening
+    if(this.opts.listen) {
+      if(!cb) return this.db.put(key, value, opts);
+      this._ignore('put', key, value); // make listener ignore this next put
+    }
+
+    var self = this;
+    this.db.put(key, value, opts, function(err) {
+      if(err) return cb(err);
+
+      self._onChange({type: 'put', key: key, value: value, cb: cb});
+    });
+  };
+
+  this.del = function(key, opts, cb) {
+    if(typeof opts === 'function') {
+      cb = opts;
+      opts = {};
+    }    
+    opts = opts || {};
+
+    // if listening
+    if(this.opts.listen) {
+      if(!cb) return this.del.put(key, opts);
+      this._ignore('del', key, value); // make listener ignore this next del
+    }
+
+    var self = this;
+    this.db.del(key, opts, function(err) {
+      if(err) return cb(err);
+
+      self._onChange({type: 'del', key: key, cb: cb});
+    });
+  };
+
+  this.batch = function(ops, opts, cb) {
+    if(!ops) throw new Error("Chained form of batch not yet supported");
+
+    if(typeof opts === 'function') {
+      cb = opts;
+      opts = {};
+    }    
+    opts = opts || {};
+
+    var i;
+
+    // if listening
+    if(this.opts.listen) {
+      if(!cb) return this.db.batch(ops, opts);
+      for(i=0; i < ops.length; i++) {
+        this._ignore('batch', ops[i]); // make listener ignore this operation
+      }
+    }
+
+    var self = this;
+    this.db.batch(ops, opts, function(err) {
+      if(err) return cb(err);
+
+      if(ops.length === 0) {
+        if(cb) cb();
+        return;
+      }
+
+      var opsCompleted = 0;
+
+      function opCompleted(err) {
+        if(err) cb(err);
+
+        opsCompleted++;
+        // run callback when all operations in this batch have completed
+        if(opsCompleted >= ops.length) {
+          cb();
+        }
+      }
+
+      for(i=0; i < ops.length; i++) {
+        // trigger callback when the last op finishes processing
+        self._onChange({type: ops[i].type, key: ops[i].key, value: ops[i].value, cb: opCompleted});
+      }
+    });
+  };
 
   // TODO auto-detect if amino acid or nucleotides
   this.query = function(seq, opts, cb) {
