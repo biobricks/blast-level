@@ -19,6 +19,13 @@ tape('simple_manual_rebuild', function(t) {
           t.pass("added bar, rebuilding blast index")
           blastDB.rebuild(function(err) {
             if(err) t.fail("mysterious failure X: " + err)
+
+/*            
+            blastDB.status(function(err, status) {
+              if(err) t.fail("status failure: " + err);
+
+              console.log(status);
+*/
             blastDB.query("ATTACACATTAC", function(err, data) {
 
               if(err) t.fail("mysterious failure Y: " + err)
@@ -39,6 +46,7 @@ tape('simple_manual_rebuild', function(t) {
               t.pass("end of results")
             })
           })
+//          })
         })
       })
     })

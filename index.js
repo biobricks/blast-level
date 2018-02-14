@@ -1173,6 +1173,7 @@ function BlastLevel(db, opts) {
       cb = opts;
       opts = {};
     }
+
     function error(err) {
       if(typeof cb === 'function') {
         return cb(new Error(err));
@@ -1222,10 +1223,17 @@ function BlastLevel(db, opts) {
 
     var task = opts.type;
 
-    if(seq.length < 30) { // auto-switch to '-short' tasks for blastn and blastp
-      if(task === 'blastn') {
+    // according to the BLAST+ manual blastn-short is optimized for 
+    // sequences of length < 50 while blastn requires a minimum 
+    // exact match of length 11.
+    // for blastp the the -short version is optimized for sequences
+    // shorter than length 30 and no minimum exact match is specified
+    if(task === 'blastn') {
+      if(seq.length < 50) {
         task = 'blastn-short';
-      } else if(type === 'blastp') {
+      }
+    } else if(task === 'blastp') {
+      if(seq.length < 30) {
         task = 'blastp-short';
       }
     }
@@ -1238,7 +1246,19 @@ function BlastLevel(db, opts) {
       error("only blastn and blastp queries are supported for now");
     }
 
-//    console.log("RUNNING:", cmd, args.join(' '));
+    // sanitize and constrain what may be user input
+    opts.maxResults = parseInt(opts.maxResults) || 50;
+    opts.offset = parseInt(opts.offset) || 0;
+    if(opts.offset < 0) opts.offset = 0;
+    if(opts.offset >= 500) opts.offset = 499;
+
+    opts.maxResults += opts.offset;
+
+    if(opts.maxResults < 1) opts.maxResults = 1;
+    if(opts.maxResults > 500) opts.maxResults = 500;
+
+    args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
+
     var outStream;
     if(opts.output === 'stream') {
       outStream = new PassThrough({objectMode: true});
@@ -1256,6 +1276,8 @@ function BlastLevel(db, opts) {
         }
       };
     }
+
+//    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
 
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
@@ -1319,10 +1341,12 @@ function BlastLevel(db, opts) {
       // keep track of hits to avoid dupes
       var hits = {};
 
-      var i = 0;
+      var i = opts.offset;
 
       function nextResult(size, next) {
-        if(i > output.length - 1) return next(null, null);
+        if(i > output.length - 1 || i >= opts.maxResults) {
+          return next(null, null);
+        }
 
         var cur = output[i++];
         self._levelRowFromBlastHit(cur, function(err, row) {
