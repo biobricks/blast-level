@@ -28,7 +28,7 @@ tape('status', function(t) {
             
 //            console.log("Got status 2:", JSON.stringify(status, null, 2));
 
-            blastDB.query("ATTACACATTAC", function(err, data) {
+            blastDB.query("ATTACACATTAC", {output: 'array'}, function(err, metadata, data) {
 
               if(err) t.fail("mysterious failure Y: " + err)
 

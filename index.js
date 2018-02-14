@@ -831,7 +831,7 @@ function BlastLevel(db, opts) {
 
         // TODO handle non-file formatted streams
         if(self.opts.seqFormatted) {
-          throw new Error("TODO not implemented");
+          throw new Error("TODO formatted non-file (string) streams not yet implemented");
         }
 
         if(seq instanceof Array) {
@@ -1167,51 +1167,60 @@ function BlastLevel(db, opts) {
   };
 
   // TODO auto-detect if amino acid or nucleotides
-  this.query = function(seq, opts, cb) {
+  this.query = function(seq, opts, callback) {
     var self = this;
     if(typeof opts === 'function') {
-      cb = opts;
+      callback = opts;
       opts = {};
     }
-
-    function error(err) {
-      if(typeof cb === 'function') {
-        return cb(new Error(err));
-      }
-      throw new Error(err);
-    }
-
-    if(!self._hasBlastDBs()) {
-      return error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index.");
-    }
+    var cb = callback;
 
     opts = xtend({
-
-      // output defaults to 'array' if cb is specified and 'stream' if not
-      output: undefined, // 'stream', 'array', 'blast' or 'blastraw',
+      output: 'stream', // 'stream', 'array', 'blast' or 'blastraw',
       type: (this.opts.type === 'aa') ? 'blastp' : 'blastn' // can be 'blastn', 'blastp', 'blastx', 'tblastx' or 'tblastn'
     }, opts || {});
 
-    // assume that output is stream 
-    if(cb) {
-      opts.output = opts.output || 'array';
-    } else {
-      opts.output = 'stream';
+    if(!cb) opts.output = 'stream';
+
+    var outStream;
+    if(opts.output === 'stream') {
+      outStream = new PassThrough({objectMode: true});
+    }
+
+    // convert errors and lack of results in callback format
+    // to stream output
+
+    if(!cb) {
+      cb = function(err, results) {
+        if(err) {
+          outStream.emit('error', err);
+          return;
+        }
+        if(!results || !results.length) {
+          from.obj(function(size, next) {
+            next(null, null); // end stream
+          }).pipe(outStream);
+        }
+      };
+    }
+
+    if(!self._hasBlastDBs()) {
+      return cb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
     }
 
     // TODO support 'blast' and 'blastraw' outputs
     if(opts.output == 'blast' || opts.output == 'blastraw') {
-      throw new Error("TODO not implemented");
+      return cb(new Error("TODO not implemented"));
     }
 
     // check if opts.type is sane
     if(this.opts.type === 'aa')  {
       if(['blastp', 'blastx'].indexOf(opts.type) < 0) {
-        error("invalid query type attempted on protein database");
+        return cb(new Error("invalid query type attempted on protein database"));
       }
     } else { // this.opts.type === 'nt'
       if(['blastn', 'tblastx', 'tblastn'].indexOf(opts.type) < 0) {
-        error("invalid query type attempted on nucleotide database");
+        return cb(new Error("invalid query type attempted on nucleotide database"));
       }
     }
 
@@ -1243,7 +1252,7 @@ function BlastLevel(db, opts) {
       args = ["-task", task, "-outfmt", "15", "-db", dbName];
     } else {
       // TODO support blastx, tblastx and tblastn
-      error("only blastn and blastp queries are supported for now");
+      return cb(new Error("only blastn and blastp queries are supported for now"));
     }
 
     // sanitize and constrain what may be user input
@@ -1257,25 +1266,11 @@ function BlastLevel(db, opts) {
     if(opts.maxResults < 1) opts.maxResults = 1;
     if(opts.maxResults > 500) opts.maxResults = 500;
 
-    args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
 
-    var outStream;
-    if(opts.output === 'stream') {
-      outStream = new PassThrough({objectMode: true});
+// this didn't really help us. it just prevents us from knowing
+// the total number of hits and doesn't speed up the query
+//    args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
 
-      // create a callback that emits an error or ends the stream
-      cb = function(err, results) {
-        if(err) {
-          outStream.emit('error', err);
-          return;
-        }
-        if(!results || !results.length) {
-          from.obj(function(size, next) {
-            next(null, null); // end stream
-          }).pipe(outStream);
-        }
-      };
-    }
 
 //    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
 
@@ -1321,7 +1316,8 @@ function BlastLevel(db, opts) {
       }
 
       if(!output) {
-        return cb(null, []);
+        // TODO add real metadata
+        return cb(null, {}, []);
       }
 
       if(opts.output === 'blastraw') {
@@ -1336,7 +1332,15 @@ function BlastLevel(db, opts) {
         return cb(null, output.BlastOutput2[0].report.results.search.hits);
       }
 
+
       output = output.BlastOutput2[0].report.results.search.hits;
+
+      // TODO think about including the following in metadata:
+      // output.BlastOutput2[0].report.params
+      // output.BlastOutput2[0].report.results.search
+      var metadata = {
+        hits: output.length
+      };;
 
       // keep track of hits to avoid dupes
       var hits = {};
@@ -1373,24 +1377,30 @@ function BlastLevel(db, opts) {
         s.on('error', function(err) {
           outStream.emit('error', err);
         })
-        return;
-      } else {
+      }
 
+
+      if(opts.output === 'array') {
         var results = [];
         s.on('data', function(data) {
           results.push(data);
         });
-
+        
         s.on('end', function() {
-          cb(null, results);
+          cb(null, metadata, results);
         });
         s.on('error', cb);
+      } else if(callback && opts.output === 'stream') {
+
+        cb(null, metadata, outStream);
       }
+
     });
 
+    // send the query to stdin of blast command-line tool
     blast.stdin.end(seq, 'utf8');
 
-    if(outStream) {
+    if(!callback) {
       return outStream;
     }
   };

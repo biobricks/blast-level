@@ -134,7 +134,24 @@ If `seqFormatted` is true then [streaming-sequence-extractor](https://www.npmjs.
 
 ## query(sequence, [opts], [cb])
 
-Run a query on the BLAST database. If cb is not specified then a stream is returned with the results. If cb is specified then an array of results is handed to the callback.
+Run a query on the BLAST database. 
+
+opts:
+
+* output: 'array' or 'stream' 
+* type: 'blastn' or 'blastp' auto-detected based on blastdb constructor `opts.type`
+
+The `blastn-short` or `blastp-short` tasks will be used rather than the `blastn` or `blastp` tasks if the query sequence is under 50 nt for `blastn` or under `30` aa for `blastp`. This is based on the BLAST+ manual recommendations
+
+The callback will called like so:
+
+```
+cb(err, metadata, data)
+```
+
+where the `data` argument will be an array per default or a stream if `opts.output` is 'stream'.
+
+
 
 ## check([cb])
 

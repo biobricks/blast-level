@@ -40,7 +40,7 @@ tape('files', function(t) {
                         s.on('end', function() {
                             t.pass("end of blast results")
                         })
-                    }, 1000)
+                    }, 2000)
                 })
             })
         })

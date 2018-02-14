@@ -26,7 +26,7 @@ tape('simple_manual_rebuild', function(t) {
 
               console.log(status);
 */
-            blastDB.query("ATTACACATTAC", function(err, data) {
+            blastDB.query("ATTACACATTAC", {output: 'array'}, function(err, metadata, data) {
 
               if(err) t.fail("mysterious failure Y: " + err)
               for (var i in data) {
