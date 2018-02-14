@@ -14,10 +14,38 @@ var rimraf = require('rimraf');
 var EventEmitter = require('events').EventEmitter;
 var PassThrough = require('readable-stream').PassThrough;
 var isStream = require('isstream');
+var glob = require('glob');
 var sse = require('streaming-sequence-extractor');
 
 
+function dbInfo(dbDir, dbName, cb) {
 
+  if(!dbDir || !dbName) return process.nextTick(cb);
+
+  var o = {
+    name: dbName,
+    path: path.resolve(path.join(dbDir, dbName) + '.*'),
+    size: 0
+  }
+
+  glob(o.path, function(err, files) {
+    if(err) return cb(err);
+
+    async.each(files, function(file, cb) {
+      fs.stat(file, function(err, stats) {
+        if(err) return cb(err);
+
+        o.size += stats.size;
+
+        cb();
+      });
+    }, function(err) {
+      if(err) return cb(err);
+
+      cb(null, o);
+    });
+  });
+}
 
 function checkCommand(cmd, cb) {
   var minVersion = '2.4.0';
@@ -531,8 +559,8 @@ function BlastLevel(db, opts) {
         
         // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
         if(which === 'main') {
-//          console.log("--------------", self._dbs.update.exists, buildNum, self._dbs.update.lastRebuild);
-          if(self._dbs.update.exists && (buildNum > self._db.update.lastRebuild)) {
+
+          if(self._dbs.update.exists && (buildNum > self._dbs.update.lastRebuild)) {
             var lastUpdateName = self._numberToDBName('update', self._dbs.update.lastRebuild);
             self._attemptDelete(lastUpdateName);
             self._dbs.update.exists = false;
@@ -1349,6 +1377,45 @@ function BlastLevel(db, opts) {
 
   this.check = function(cb) {
     checkCommands(this.opts.binPath, cb);
+  };
+
+  this.status = function(cb) {
+    var stat = {
+      opts: xtend(this.opts, {}) // clone opts
+    };
+
+    if(this.opts.mode !== 'blastdb') {
+      process.nextTick(function() {
+        cb(null, stat);
+      });
+      return;
+    }
+    var self = this;
+    
+    var mainDBName = this._dbName('main');
+    dbInfo(this.opts.path, mainDBName, function(err, info) {
+      if(err) return cb(err);
+
+      stat.mainDB = info;
+
+      var updateDBName = self._dbName('update');
+
+      dbInfo(self.opts.path, updateDBName, function(err, info) {
+        if(err) return cb(err);      
+
+        stat.updateDB = info;
+
+        if(!stat.mainDB || !stat.updateDB) {
+          stat.ratio = 1;
+        } else {
+          stat.ratio = (stat.mainDB.size / (stat.mainDB.size + stat.updateDB.size)).toFixed(2);
+        }
+
+        stat.shouldRebuild = (stat.ratio < 0.9);
+
+        cb(null, stat);
+      });
+    });
   };
 
   this._init();

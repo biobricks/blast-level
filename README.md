@@ -140,6 +140,53 @@ Run a query on the BLAST database. If cb is not specified then a stream is retur
 
 Check if the correct versions of all required NCBI BLAST+ binaries are installed. If no callback is specified then prints the results to stdout/stderr.
 
+## .status(cb)
+
+Get information about BLAST database status such as the name, path and size of each BLAST database. This is only relevant in `blastdb` mode.
+
+The callback is called with `cb(err, status)` where status is an object looking something like this:
+
+```{
+  "opts": {
+    "mode": "blastdb",
+    "type": "nt",
+    "seqProp": "seq",
+    "changeProp": "updated",
+    "filterChanged": true,
+    "seqFormatted": false,
+    "seqIsFile": false,
+    "seqFileBasePath": ".",
+    "seqFileEncoding": "utf8",
+    "path": "/tmp/tmp-7943PLJ1i00go537",
+    "listen": false,
+    "rebuild": false,
+    "rebuildOnChange": false,
+    "binPath": "",
+    "debug": false
+  },
+  "mainDB": {
+    "name": "main-1",
+    "path": "/tmp/tmp-7943PLJ1i00go537/main-1.*",
+    "size": 188
+  },
+  "updateDB": {
+    "name": "update-2",
+    "path": "/tmp/tmp-7943PLJ1i00go537/update-2.*",
+    "size": 192
+  },
+  "ratio": "0.98",
+  "shouldRebuild": false
+}
+```
+
+`opts` is just a copy of the options used by this blastDB instance when the call was made. 
+
+`mainDB` and `updateDB` will only be present of the main and update databases exist. The name, absolute path and size in bytes is included.
+
+`ratio` is the percentage of both BLAST databases made up by the main database. For optimal performance you want most of your database to be in the main database since the main database isn't auto-rebuilt on every change (unless you've specified `rebuildOnChange:true` or aren't using `blastdb` mode). You can use `ratio` as an indicator of when a rebuild is necessary. If either the `update` or `main` databases are missing then the ratio will be 1.
+
+`shouldRebuild` is a boolean that becomes true if the ratio drops below 0.1.
+
 ## .put(key, value, [opts], cb)
 
 Same as a `.put` directly on the database but will wait for the index to finish updating before calling the callback.

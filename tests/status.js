@@ -3,35 +3,52 @@ var tape = require('tape');
 
 tape('simple_manual_rebuild', function(t) {
   t.plan(3)
+
   base(function(db, blastDB) {
-    db.put('foo', {
+
+    blastDB.put('foo', {
       seq: "GATTACACATTACA",
       updated: 1
     }, function(err) {
-      t.pass("added foo, building blast index")
+      t.pass("added foo, not rebuilding")
 
-      blastDB.rebuild(function(err) {
-        if(err) t.fail("mysterious failure W: " + err)
-        db.put('bar', {
+      blastDB.status(function(err, status) {
+        if(err) t.fail("failed during blastDB.status call 1: " + err);
+
+        console.log("Got status 1:", JSON.stringify(status, null, 2));
+      
+        blastDB.put('bar', {
           seq: "CATCATCATATTACACATTACCATCATCAT",
           updated: 1
         }, function(err) {
           t.pass("added bar, rebuilding blast index")
-          blastDB.rebuild(function(err) {
-            if(err) t.fail("mysterious failure X: " + err)
+
+          blastDB.status(function(err, status) {
+            if(err) t.fail("failed during blastDB.status call 2: " + err);
+            
+            console.log("Got status 2:", JSON.stringify(status, null, 2));
+
             blastDB.query("ATTACACATTAC", function(err, data) {
 
               if(err) t.fail("mysterious failure Y: " + err)
+
               for (var i in data) {
                 delete data[i].hsps
               }
-              t.deepEqual(data,[{
-                key: 'foo',
-                value: { seq: 'GATTACACATTACA', updated: 1 },
-                index: undefined
-              },{
+
+              data.sort(function(a, b) {
+                if(a < b) return -1;
+                if(b > a) return 1;
+                return 0;
+              });
+
+              t.deepEqual(data, [{
                 key: 'bar',
                 value: { seq: 'CATCATCATATTACACATTACCATCATCAT', updated: 1 },
+                index: undefined
+              }, {
+                key: 'foo',
+                value: { seq: 'GATTACACATTACA', updated: 1 },
                 index: undefined
               }],"query data as expected")
             }, function(err) {
