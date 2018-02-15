@@ -515,6 +515,8 @@ function BlastLevel(db, opts) {
 //    console.log("@@@ _rebuild db:", dbName);
 //    console.log("@@@ _buffer:", this._changeBuffer.length);
     
+    console.log("GOT HERE -1");
+
     // pick the function to actually call to rebuild
     // based on whether we're rebuilding the 'main' or 'update' db
     var f;
@@ -526,11 +528,18 @@ function BlastLevel(db, opts) {
     }
     
     f(dbName, data, function(err) {
-      if(err) return cb(err);
-    
+      if(err) {
+        // a common error is:
+        // "FASTA-Reader: Ignoring invalid residues at position(s)"
+        // which should not make the rebuild fail
+        if(!err.message || !err.message.match(/ignoring/i)) {
+          return cb(err);
+        }
+      }
+
       self._saveBlastDBName(which, dbName, function(err) {
         if(err) return cb(err);
-        
+
 //        console.log("@@@ finalizing _rebuild:", dbName)
         
         // if this build's number is greater than the number of the
@@ -543,19 +552,21 @@ function BlastLevel(db, opts) {
         // delete it right away.
         
         if(!(buildNum > self._dbs[which].lastRebuild)) {
+
           // another more recent rebuild completed before us so our
           // rebuild is now outdated and we can delete it immediately
           // since no other references to this db will exist
           self._deleteDB(dbName); // callback doesn't have to wait for this
           return cb();
         }
-        
+
         var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
         
         if(self._dbs[which].exists && self._dbs[which].lastRebuild) {
           self._attemptDelete(lastName)
         };
         self._dbs[which].lastRebuild = buildNum;
+        self._dbs[which].exists = true;
         
         // if this is a rebuild on the main db, also delete the previous update if one exists and is older than this main db rebuild
         if(which === 'main') {
@@ -1205,7 +1216,12 @@ function BlastLevel(db, opts) {
     }
 
     if(!self._hasBlastDBs()) {
-      return cb(new Error("No blast index. Make sure your database isn't empty, then call .rebuild to build the blast index."));
+      if(outStream) {
+        return cb(null, {hits: 0}, from.obj(function(size, next) {
+          next(null, null); // end stream
+        }));
+      }
+      return cb(null, {hits: 0}, []);
     }
 
     // TODO support 'blast' and 'blastraw' outputs
@@ -1272,7 +1288,8 @@ function BlastLevel(db, opts) {
 //    args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
 
 
-//    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
+    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
+    console.log("WITH QUERY:", seq);
 
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
@@ -1373,12 +1390,15 @@ function BlastLevel(db, opts) {
 
       if(outStream) {
         s.pipe(outStream);
-        // forward errors
+        // forward errors and end
         s.on('error', function(err) {
           outStream.emit('error', err);
         })
+        // TODO is this necessary?
+        s.on('end', function(err) {
+          outStream.emit('end');
+        })
       }
-
 
       if(opts.output === 'array') {
         var results = [];
