@@ -143,7 +143,7 @@ opts:
 
 The `blastn-short` or `blastp-short` tasks will be used rather than the `blastn` or `blastp` tasks if the query sequence is under 50 nt for `blastn` or under `30` aa for `blastp`. This is based on the BLAST+ manual recommendations
 
-The callback will called like so:
+If a callback is provided then it will called like so:
 
 ```
 cb(err, metadata, data)
@@ -151,7 +151,7 @@ cb(err, metadata, data)
 
 where the `data` argument will be an array per default or a stream if `opts.output` is 'stream'.
 
-
+If no callback is provided then a stream will be returned, even if `output` is set to 'array'. You will not be able to access the metadata using this calling convention.
 
 ## check([cb])
 

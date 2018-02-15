@@ -514,8 +514,6 @@ function BlastLevel(db, opts) {
     var dbName = this._numberToDBName(which, buildNum);
 //    console.log("@@@ _rebuild db:", dbName);
 //    console.log("@@@ _buffer:", this._changeBuffer.length);
-    
-    console.log("GOT HERE -1");
 
     // pick the function to actually call to rebuild
     // based on whether we're rebuilding the 'main' or 'update' db
@@ -1184,14 +1182,13 @@ function BlastLevel(db, opts) {
       callback = opts;
       opts = {};
     }
-    var cb = callback;
 
     opts = xtend({
       output: 'stream', // 'stream', 'array', 'blast' or 'blastraw',
       type: (this.opts.type === 'aa') ? 'blastp' : 'blastn' // can be 'blastn', 'blastp', 'blastx', 'tblastx' or 'tblastn'
     }, opts || {});
 
-    if(!cb) opts.output = 'stream';
+    if(!callback) opts.output = 'stream';
 
     var outStream;
     if(opts.output === 'stream') {
@@ -1201,8 +1198,12 @@ function BlastLevel(db, opts) {
     // convert errors and lack of results in callback format
     // to stream output
 
-    if(!cb) {
-      cb = function(err, results) {
+    var cb;
+
+    if(!callback) {
+      // if no callback, 
+      // convert callback calls to empty stream results
+      cb = function(err, metadata, results) {
         if(err) {
           outStream.emit('error', err);
           return;
@@ -1213,6 +1214,22 @@ function BlastLevel(db, opts) {
           }).pipe(outStream);
         }
       };
+    } else {
+      // wrap callback so sane results with an empty
+      // stream are always returned
+      cb = function(err, metadata, stream) {
+        if(err) return callback(err);
+
+        metadata = metadata || {};
+        if(!metadata.hits) metadata.hits = 0;
+
+        if(!stream) {
+          stream = from.obj(function(size, next) {
+            next(null, null); // end stream
+          })
+        }
+        callback(null, metadata, stream);
+      }
     }
 
     if(!self._hasBlastDBs()) {
@@ -1221,7 +1238,7 @@ function BlastLevel(db, opts) {
           next(null, null); // end stream
         }));
       }
-      return cb(null, {hits: 0}, []);
+      return cb();
     }
 
     // TODO support 'blast' and 'blastraw' outputs
@@ -1288,8 +1305,8 @@ function BlastLevel(db, opts) {
 //    args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
 
 
-    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
-    console.log("WITH QUERY:", seq);
+//    console.log("!!!! Running command:", cmd + ' ' + args.join(' '));
+//    console.log("WITH QUERY:", seq);
 
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
@@ -1333,22 +1350,24 @@ function BlastLevel(db, opts) {
       }
 
       if(!output) {
-        // TODO add real metadata
-        return cb(null, {}, []);
+        return cb();
       }
 
+/* 
       if(opts.output === 'blastraw') {
         return cb(null, output);
       }
+*/
 
       if(!output.BlastOutput2 || !output.BlastOutput2.length || !output.BlastOutput2[0] || !output.BlastOutput2[0].report || !output.BlastOutput2[0].report.results || !output.BlastOutput2[0].report.results.search || !output.BlastOutput2[0].report.results.search.hits || !output.BlastOutput2[0].report.results.search.hits.length) {
-        return cb(null, []);
+        return cb(null);
       }
 
+/*
       if(opts.output === 'blast') {
         return cb(null, output.BlastOutput2[0].report.results.search.hits);
       }
-
+*/
 
       output = output.BlastOutput2[0].report.results.search.hits;
 
@@ -1411,7 +1430,6 @@ function BlastLevel(db, opts) {
         });
         s.on('error', cb);
       } else if(callback && opts.output === 'stream') {
-
         cb(null, metadata, outStream);
       }
 
