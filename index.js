@@ -787,7 +787,7 @@ function BlastLevel(db, opts) {
     
     makedb.stderr.on('close', function() {
       // Ignore "no sequences added" errors
-      if(stderr && stderr.match && stderr.match(/No sequences added/i) {
+      if(stderr && stderr.match && stderr.match(/No sequences added/i)) {
         stderr = '';
       }
     });
