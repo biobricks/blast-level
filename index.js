@@ -777,7 +777,7 @@ function BlastLevel(db, opts) {
     });
 
     makedb.on('close', function() {
-      stderr = stderr ? new Error(stderr) : undefined;
+      stderr = stderr ? new Error(stderr) : '';
       cb(stderr, addedCount)
     });
 
@@ -787,8 +787,9 @@ function BlastLevel(db, opts) {
     
     makedb.stderr.on('close', function() {
       // Ignore "no sequences added" errors
-      m = stderr.match(/No sequences added/i);
-      if(m) stderr = '';
+      if(stderr && stderr.match && stderr.match(/No sequences added/i) {
+        stderr = '';
+      }
     });
   };
 
