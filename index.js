@@ -564,7 +564,7 @@ function BlastLevel(db, opts) {
         }
       }
 
-      debug(1, "Finished rebuilding database:", which);
+      debug(1, "Finished rebuilding database", which, "with", count, "entries");
 
       self._saveBlastDBName(which, dbName, function(err) {
         if(err) return cb(err);
@@ -808,7 +808,11 @@ function BlastLevel(db, opts) {
     });
 
     makedb.on('close', function() {
-      stderr = stderr ? new Error(stderr) : '';
+      // Ignore "no sequences added" errors
+      if(stderr && stderr.match && stderr.match(/No sequences added/i)) {
+        stderr = null;
+      }
+      stderr = stderr ? new Error(stderr) : null;
       cb(stderr, addedCount)
     });
 
@@ -816,12 +820,6 @@ function BlastLevel(db, opts) {
       stderr += data.toString();
     });    
     
-    makedb.stderr.on('close', function() {
-      // Ignore "no sequences added" errors
-      if(stderr && stderr.match && stderr.match(/No sequences added/i)) {
-        stderr = '';
-      }
-    });
   };
 
 
@@ -983,10 +981,10 @@ function BlastLevel(db, opts) {
     this._createBlastDB(dbName, function(err, count) {
       if(err) return cb(err);
 
-      debug(1, "Finished creating blast main db:", dbName);
+      debug(1, "Finished creating blast main db", dbName, "with", count, "entries");
 
       self._dbs.main.exists = (count == 0) ? false : true;
-      
+
       cb(null, count);
     });
   };
