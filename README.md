@@ -120,7 +120,7 @@ var blastDB = blastLevel(db, {
     rebuild: false, // rebuild the BLAST db on initialization (now)
     rebuildOnChange: false, // rebuild BLAST db whenever the leveldb is changed
     binPath: undefined, // path where BLAST+ binaries are located if not in PATH
-    debug: false // turn debug output on or off
+    debug: 0 // debug output levels are 0 (off), 1 (brief) and 2 (full)
 });
 ```
 
