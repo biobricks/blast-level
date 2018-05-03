@@ -566,6 +566,12 @@ function BlastLevel(db, opts) {
 
       debug(1, "Finished rebuilding database", which, "with", count, "entries");
 
+      // blast databases with 0 entries cannot exist
+      // so this means a new database was not built 
+      if(count <= 0) {
+        return cb(null, count);
+      }
+
       self._saveBlastDBName(which, dbName, function(err) {
         if(err) return cb(err);
 
@@ -982,8 +988,6 @@ function BlastLevel(db, opts) {
       if(err) return cb(err);
 
       debug(1, "Finished creating blast main db", dbName, "with", count, "entries");
-
-      self._dbs.main.exists = (count == 0) ? false : true;
 
       cb(null, count);
     });
