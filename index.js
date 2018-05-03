@@ -166,7 +166,6 @@ function BlastLevel(db, opts) {
   this.opts = opts;
   if(!this.opts.binPath) this.opts.binPath = '';
 
-
   function debug(level) {
     if(!opts.debug || level > opts.debug) return;
     var args = Array.prototype.slice.call(arguments, 1);
@@ -239,7 +238,7 @@ function BlastLevel(db, opts) {
       if(err) return self.emit('error', err);
       self._ready = true;
       self.emit('ready');
-//      console.log("ready!");
+      debug(1, "Initialiation complete");
       self._processBuffer();
     }
   
@@ -255,7 +254,8 @@ function BlastLevel(db, opts) {
         self.rebuild(function(err) {
           if(err) return cb(err);
 
-          debug(1, "Initialized and rebuilt database");
+          debug(1, "Finished intialization rebuild of database");
+          cb();
         })
       });     
       return;
@@ -265,7 +265,7 @@ function BlastLevel(db, opts) {
     this._checkDBParentDir(function(err) {
 
       // check if a main db exists. if not and if opts.rebuild then create it
-      self._openDB('main', self.opts.rebuild, function(err, existed) {
+      self._openDB('main', self.opts.rebuild, function(err, existed, dbName) {
         if(err) return cb(err);
 
         // if the main db didn't already exist 
@@ -276,18 +276,24 @@ function BlastLevel(db, opts) {
           cb();
           return;
         }
+
+        debug(1, "Initialized with pre-existing main db:", dbName);
         
-        self._openDB('update', false, function(err) {
+        self._openDB('update', false, function(err, existed, dbName) {
           if(err) return cb(err);
 
-          debug(1, "Initialized with pre-existing main db.");
+          if(existed) {
+            debug(1, "Initialized with pre-existing main db:", dbName);
+          } else {
+            debug(1, "Initialized with pre-existing update db:", dbName);
+          }
+          cb();
         });
       });
     });
   };
 
   this._buffer = function(change) {
-//    console.log("+++++++ buffering:", change);
     this._changeBuffer.push(change);
   };
 
@@ -295,7 +301,6 @@ function BlastLevel(db, opts) {
     var self = this;
 
     // if we're already processing then we don't want to trigger again
-    // TODO what if we have a callback?
     if(this._processingBuffer) return;
 
     // if we're doing a complete rebuild on every change
@@ -327,8 +332,6 @@ function BlastLevel(db, opts) {
       return;
     }
 
-//    console.log("####### processing change buffer of length:", this._changeBuffer.length);
-
     this._processingBuffer = true;
 
     var changes;
@@ -339,7 +342,7 @@ function BlastLevel(db, opts) {
         changes = self._changeBuffer;
         self._changeBuffer = [];
         
-        debug(1, "Processing buffer");
+        debug(1, "Processing change buffer");
 
         self._processPuts(changes, function(err) {
 
@@ -470,14 +473,12 @@ function BlastLevel(db, opts) {
 
   // Check if there is an existing BLAST db
   // and store the state in this._dbs if so.
-  // If it does not exist and rebuild is true then rebuil it.
+  // If it does not exist and rebuild is true then rebuild it.
   this._openDB = function(which, rebuild, cb) {
     var self = this;
 
     self._loadBlastDBName(which, function(err, dbName) {
       if(err) return cb(err);    
-
-//      console.log('9999999999999999999================================', dbName);
 
       if(dbName) {
         self._dbs[which].exists = true;
@@ -485,24 +486,25 @@ function BlastLevel(db, opts) {
         if(self._dbs.rebuildCount < self._dbs[which].lastRebuild) {
           self._dbs.rebuildCount = self._dbs[which].lastRebuild;
         }
-        return cb(null, true);
+        return cb(null, true, dbName);
       }
 
-      if(!rebuild) return cb(null, false);
+      if(!rebuild) return cb(null, false, dbName);
 
-      self._rebuild(which, cb);
+      self._rebuild(which, function(err) {
+        if(err) return cb(err);
+
+        cb(null, false, dbName);
+      });
     });
   };
 
   this._checkDBParentDir = function(cb) {
     var self = this;
 
-//    console.log("@@@ checking if db parent dir exists")
-
     fs.stat(self.opts.path, function(err, stats) {
       if(err) {
         if(err.code === 'ENOENT') {
-//          console.log("@@@ parent dir did not exist");
 
           fs.mkdir(self.opts.path, function(err) {
             if(err) return cb(err);
@@ -518,7 +520,6 @@ function BlastLevel(db, opts) {
         return cb(new Error("Specified path must be a directory"));
       }
 
-//      console.log("@@@ parent dir exists");
       cb();
     });
   }
@@ -543,15 +544,12 @@ function BlastLevel(db, opts) {
     
     // generate a directory-unique db name
     var dbName = this._numberToDBName(which, buildNum);
-//    console.log("@@@ _rebuild db:", dbName);
-//    console.log("@@@ _buffer:", this._changeBuffer.length);
 
     // pick the function to actually call to rebuild
     // based on whether we're rebuilding the 'main' or 'update' db
     var f;
     if(which === 'main') {
       f = this._rebuildMainDB.bind(this);
-//      console.log("REBUILDING MAIN DB");
     } else { // 'update'
       f = this._rebuildUpdateDB.bind(this);
     }
@@ -571,8 +569,6 @@ function BlastLevel(db, opts) {
       self._saveBlastDBName(which, dbName, function(err) {
         if(err) return cb(err);
 
-//        console.log("@@@ finalizing _rebuild:", dbName)
-        
         // if this build's number is greater than the number of the
         // most recently completed rebuild then we know our rebuild
         // is newer than the previous rebuild so we can safely
@@ -683,7 +679,6 @@ function BlastLevel(db, opts) {
       } else {
         this._queryCount[names[i]] = (num >= 0) ? num : 0;
       }
-//      console.log("Query count for", names[i], "changed to:", this._queryCount[names[i]])
     }
   };
 
@@ -787,8 +782,7 @@ function BlastLevel(db, opts) {
         opts.stream.pipe(seqStream);
 
       } else { // no stream specified so make a stream from entire database
-        // TODO assuming JSON values (what if it's a string or buffer?)
-        this.db.createReadStream({valueEncoding: 'json'}).pipe(seqStream);
+        this.db.createReadStream().pipe(seqStream);
       }
       
       if(this.opts.debug >= 2) {
@@ -871,7 +865,6 @@ function BlastLevel(db, opts) {
       seq = self._seqFromVal(data.value);
       change = self._changeFromVal(data.value);
 
-//      console.log('---------------------------', seq, change);
       if(!seq || !change) return cb();
 
       if(!self.opts.seqIsFile) {
@@ -936,9 +929,6 @@ function BlastLevel(db, opts) {
   // which no longer have any running queries
   this._processDeletions = function(cb) {
     var self = this;
-    
-//    console.log("--- processing deletions: ", this._toDelete);
-//    console.log("      counts:", this._queryCount);
 
     if(this._toDelete.length <= 0) {
       if(cb) process.nextTick(cb);
@@ -972,7 +962,9 @@ function BlastLevel(db, opts) {
       'nog'
     ];
     var self = this;
-    
+
+    debug(1, "Deleting database:", name);
+
     async.each(exts, function(ext, cb) {
       fs.unlink(path.join(self.opts.path, name+'.'+ext), cb);
     }, function(err) {
@@ -1078,7 +1070,6 @@ function BlastLevel(db, opts) {
   
 
   this._attemptDelete = function(dbName) {
-//    console.log("//// attempting to delete", dbName);
     this._toDelete.push(dbName);
     this._processDeletions();
   };
@@ -1234,6 +1225,9 @@ function BlastLevel(db, opts) {
 
     if(!callback) opts.output = 'stream';
 
+    debug(1, "Running query with output mode:", opts.output);
+    debug(2, "  query sequence:", seq);
+
     var outStream;
     if(opts.output === 'stream') {
       outStream = new PassThrough({objectMode: true});
@@ -1343,6 +1337,8 @@ function BlastLevel(db, opts) {
     // the total number of hits and doesn't speed up the query
     // args = args.concat(["-max_target_seqs", opts.maxResults.toString()]);
 
+    debug(1, "Running command:", cmd + ' ' + args.join(' '));
+
     var blast = spawn(cmd, args, {
       cwd: this.opts.path
     });
@@ -1361,7 +1357,7 @@ function BlastLevel(db, opts) {
         stderr += data.toString();
     });
 
-    blast.stdin.on('error', function(err) {
+    blast.stdout.on('error', function(err) {
         // these error messages are rarely useful
         // and are accompanied by more useful .stderr messages
         // so just make sure they're handled and throw away the message
