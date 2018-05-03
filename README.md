@@ -132,7 +132,7 @@ The option `seqProp` must be defined. Additionally `path` must be defined in 'bl
 
 If `seqFormatted` is true then [streaming-sequence-extractor](https://www.npmjs.com/package/streaming-sequence-extractor) is used to extract sequence information from FASTA, GenBank or SBOL data. The format is autodetected. This can be used with `seqIsFile` to consume sequences in a variety of formats based on file paths stored in the database.
 
-## query(sequence, [opts], [cb])
+## .query(sequence, [opts], [cb])
 
 Run a query on the BLAST database. 
 
@@ -153,7 +153,17 @@ where the `data` argument will be an array per default or a stream if `opts.outp
 
 If no callback is provided then a stream will be returned, even if `output` is set to 'array'. You will not be able to access the metadata using this calling convention.
 
-## check([cb])
+## .rebuild([cb])
+
+Rebuild the blast database. The callback will receive args:
+
+```
+cb(err, count);
+```
+
+Where `count` is the number of entries added to the blast database.
+
+## .check([cb])
 
 Check if the correct versions of all required NCBI BLAST+ binaries are installed. If no callback is specified then prints the results to stdout/stderr.
 

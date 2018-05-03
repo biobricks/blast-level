@@ -554,7 +554,7 @@ function BlastLevel(db, opts) {
       f = this._rebuildUpdateDB.bind(this);
     }
     
-    f(dbName, data, function(err) {
+    f(dbName, data, function(err, count) {
       if(err) {
         // a common error is:
         // "FASTA-Reader: Ignoring invalid residues at position(s)"
@@ -584,7 +584,7 @@ function BlastLevel(db, opts) {
           // rebuild is now outdated and we can delete it immediately
           // since no other references to this db will exist
           self._deleteDB(dbName); // callback doesn't have to wait for this
-          return cb();
+          return cb(null, count);
         }
 
         var lastName = self._numberToDBName(which, self._dbs[which].lastRebuild);
@@ -604,7 +604,7 @@ function BlastLevel(db, opts) {
             self._dbs.update.exists = false;
           } 
         }
-        cb();
+        cb(null, count);
       });
     });
   };
@@ -987,7 +987,7 @@ function BlastLevel(db, opts) {
 
       self._dbs.main.exists = (count == 0) ? false : true;
       
-      cb();
+      cb(null, count);
     });
   };
 
@@ -1028,7 +1028,7 @@ function BlastLevel(db, opts) {
       if(!self._dbs.update.exists) {
         debug(1, "Finished building first blast update db with ", count, "sequences");
         self._dbs.update.exists = true;
-        cb();
+        cb(null, count);
         return;
       }
 
@@ -1052,7 +1052,7 @@ function BlastLevel(db, opts) {
         rimraf(path.join(self.opts.path, newSeqsDBName)+'.*', function(err) {
           if(err) return cb(err);
 
-          cb();
+          cb(null, count);
         })
       });
     });

@@ -2,7 +2,7 @@ var base = require('./common/base.js');
 var tape = require('tape');
 
 tape('simple_manual_rebuild', function(t) {
-  t.plan(3)
+  t.plan(4)
   base(function(db, blastDB) {
     db.put('foo', {
       seq: "GATTACACATTACA",
@@ -17,15 +17,11 @@ tape('simple_manual_rebuild', function(t) {
           updated: 1
         }, function(err) {
           t.pass("added bar, rebuilding blast index")
-          blastDB.rebuild(function(err) {
+          blastDB.rebuild(function(err, count) {
             if(err) t.fail("mysterious failure X: " + err)
 
-/*            
-            blastDB.status(function(err, status) {
-              if(err) t.fail("status failure: " + err);
+            t.equal(count, 2);
 
-              console.log(status);
-*/
             blastDB.query("ATTACACATTAC", {output: 'array'}, function(err, metadata, data) {
 
               if(err) t.fail("mysterious failure Y: " + err)
