@@ -36,7 +36,7 @@ npm install
 var level = require('level');
 var blastLevel = require('blast-level');
 
-var db = level('mydb');
+var db = level('mydb', {valueEncoding: 'json'});
 var blastDB = blastLevel(db, {
     type: 'nt', // this is a nucleotide database (as opposed to amino acids)
     seqProp: 'sequence', // property in 'mydb' that stores the sequence data
@@ -84,7 +84,7 @@ blastDB.blast('caaaggcgaaactgtttacc', function(err, data) {
 blastlevel can operate in two different modes: 
 
 * blastdb: Fastest search but sequence changes trigger partial BLAST db rebuild
-* direct: TODO not yet implemented. At least 2-3x slower than blastdb and puts more load on node.js + leveldb but no BLAST db is ever written to disk.
+* direct: TODO not yet implemented. At least 2-3x slower than blastdb and puts much more load on the node.js process + leveldb but no BLAST db is ever written to disk.
 
 ## blastdb
 
@@ -124,7 +124,7 @@ var blastDB = blastLevel(db, {
 });
 ```
 
-The option `seqProp` must be defined. Additionally `path` must be defined in 'blastdb' mode and `changeProp` must be defined in 'blastdb' mode unless rebuildOnChange is true or `filterChanged` is false.
+The option `seqProp` must be defined. Additionally `path` must be defined in 'blastdb' mode and `changeProp` must be defined in 'blastdb' mode unless `rebuildOnChange` is true or `filterChanged` is false.
 
 `seqProp` can be a simple property name like 'sequence' or it can be a property path like 'foo.bar.baz.sequence'. It can also be a synchronous function that takes the value as its only argument and returns the sequence or file path. If the value is undefined for a leveldb value then that value will be skipped.
 
@@ -230,16 +230,15 @@ If `opts.rebuildOnChange` is false (the default) then two databases are kept. A 
 
 ## Gotchas 
 
-When operating in blastdb mode with rebuildOnChange:false when a sequence is deleted or changed in leveldb the sequence is not deleted in the main blast database. If a query is run that results in a hit on a deleted or changed sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last rebuild, no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using the 'direct' mode or manually triggering a rebuild more often.
+When operating in blastdb mode with `rebuildOnChange:false` when a sequence is deleted or changed in leveldb the sequence is not deleted in the main blast database. If a query is run that results in a hit on a deleted or changed sequence the hit will be reported by blast but the hit will not be passed on to your callback. Since blast has a maximum number of hits that it reports for each query (usually 30) this can result in fewer than the expected number of hits being reported for no apparant reason or in extreme cases where all top 30 hits for a query have been deleted since last rebuild, no hits will be reported even though there may be hits on sequences with lower scores than the 30 deleted sequences. This is probably not fixable without changing the NCBI BLAST+ codebase. If you have a use case where this may become an issue you should consider using the 'direct' mode or manually triggering a rebuild more often.
 
 # ToDo
 
 ## Next version
 
 * switch away from level-changes so we can catch .on('batch')
-* add useful debug output when opts.debug is used. maybe two levels of debug?
 * add support for blastx, tblastx and tblastn
-* write a whole bunch of unit tests
+* write more unit tests
 
 ## Future
 
